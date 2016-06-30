@@ -13,8 +13,8 @@ void QuickAppLoop(std::function<void()> loopProcedure);
 #include <SDL2/SDL_opengl.h>
 
 #ifdef QUICKAPP_IMGUI
-#include <imgui.cpp>
-#include <imgui_draw.cpp>
+#include "imgui.cpp"
+#include "imgui_draw.cpp"
 #endif//QUICK_APP_IMGUI
 
 namespace QuickAppInternal{
