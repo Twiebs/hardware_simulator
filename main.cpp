@@ -3,8 +3,6 @@
 #define QUICKAPP_RENDER
 #include "QuickApp.h"
 
-#include "imgui_node_graph_test.cpp"
-
 template<typename T>
 struct DynamicArray {
   size_t capacity;
@@ -323,13 +321,18 @@ void DrawEditor(Editor *editor){
     ImVec2 node_rect_min = offset + node->position - ImVec2(12,12);
     ImGui::SetCursorScreenPos(node_rect_min);
     ImVec2 size = ImVec2(node->size.x + 32, node->size.x + 32);
+
+
     ImGui::PushID(i);
     ImGui::InvisibleButton("##node", size);
 
     bool hovered_slot_is_input = false;
     int hovered_slot_index = -1;
 
-    if(ImGui::IsItemHovered()) {
+
+    //TODO(Torin) HACK imgui is not returning true on any of these when it should so were checking every single
+    //node and its io slots for intersection on a mouse click
+    if(ImGui::IsItemHovered() || ImGui::IsItemClicked() || ImGui::IsItemActive() || ImGui::IsMouseClicked(0)) {
       size_t total_slot_count = node->input_count + node->output_count;
       for(size_t slot_index = 0; slot_index < total_slot_count; slot_index++){
         bool is_input_slot = slot_index < node->input_count;
@@ -353,16 +356,32 @@ void DrawEditor(Editor *editor){
       }
     }
 
-    const ImColor default_color = ImColor(150,150,150,150);
-    const ImColor hover_color   = ImColor(220, 150, 150, 150);
-    for(int slot_idx = 0; slot_idx < node->input_count; slot_idx++)
-      draw_list->AddCircleFilled(offset + node->GetInputSlotPos(slot_idx), NODE_SLOT_RADIUS, (hovered_slot_index == slot_idx && hovered_slot_is_input) ? hover_color : default_color);
-    for(int slot_idx = 0; slot_idx < node->output_count; slot_idx++)
-      draw_list->AddCircleFilled(offset + node->GetOutputSlotPos(slot_idx), NODE_SLOT_RADIUS, (hovered_slot_index == slot_idx && hovered_slot_is_input == false) ? hover_color : default_color);
+    static bool do_test = false;
+    if(ImGui::IsMouseClicked(0)){
+      do_test = true;
+    }
+
+    static const ImColor default_color = ImColor(150,150,150,150);
+    static const ImColor hover_color   = ImColor(220, 150, 150, 150);
+    for(int slot_idx = 0; slot_idx < node->input_count; slot_idx++) {
+      const ImColor color = ((hovered_slot_index == slot_idx) && (hovered_slot_is_input == true)) ? hover_color : default_color;
+      draw_list->AddCircleFilled(offset + node->GetInputSlotPos(slot_idx), NODE_SLOT_RADIUS, color);
+    }
+
+    for(int slot_idx = 0; slot_idx < node->output_count; slot_idx++){
+      const ImColor color = ((hovered_slot_index == slot_idx) && (hovered_slot_is_input == false)) ? hover_color : default_color;
+      draw_list->AddCircleFilled(offset + node->GetOutputSlotPos(slot_idx), NODE_SLOT_RADIUS, color);
+    }
+      
 
     if(hovered_slot_index != -1){
       if(ImGui::IsMouseDoubleClicked(0)){
         if(hovered_slot_is_input == false){
+          for(size_t i = 0; i < node->outputConnections.count; i++){
+            NodeConnection *connection = &node->outputConnections[i];
+            EditorNode *destNode = &editor->nodes[connection->node_index];
+            ArrayRemoveAtIndexUnordered(connection->slot_index, destNode->inputConnections);
+          }
           node->outputConnections.count = 0;
           dragNodeIndex = -1;
         }
@@ -374,9 +393,9 @@ void DrawEditor(Editor *editor){
           EditorNode *sourceNode = &editor->nodes[dragNodeIndex];
           EditorNode *destNode = node;
 
-          //TORIN(Torin) Creating a output connection that goes to the same input
+          //TODO(Torin) Creating a output connection that goes to the same input
           // **SHOULD** be imposible but make sure thats true
-          //TODO(TORIN) ^^^^^ ASSUMTION IS WRONG WRONG WRONG FIX FIX FIX
+          //TODO(Torin) ^^^^^ ASSUMTION IS WRONG WRONG WRONG FIX FIX FIX
 
           NodeConnection outputToInput = {};
           outputToInput.node_index = i;
@@ -423,7 +442,21 @@ void DrawEditor(Editor *editor){
     ImVec2 scene_pos = ImGui::GetMousePosOnOpeningCurrentPopup() - offset;
     if(node_hovered != -1){
       EditorNode *node = &editor->nodes[node_hovered];
-      if(ImGui::MenuItem("Delete")) {
+      if(ImGui::MenuItem("Delete")){
+        //TODO(Torin) Refactor!!! inputConnections does not need to be dynamic for basic node types
+        assert(node->inputConnections.count <= node->input_count);
+        for(size_t i = 0; i < node->inputConnections.count; i++){
+          NodeConnection *connection = &node->inputConnections[i];
+          EditorNode *inputSource = &editor->nodes[connection->node_index];
+          ArrayRemoveAtIndexUnordered(connection->slot_index, inputSource->outputConnections);
+        }
+
+        for(size_t i = 0; i < node->outputConnections.count; i++){
+          NodeConnection *connection = &node->outputConnections[i];
+          EditorNode *connectionDest = &editor->nodes[connection->node_index];
+          ArrayRemoveAtIndexUnordered(connection->slot_index, connectionDest->inputConnections);
+        }
+
         ArrayRemoveAtIndexUnordered(node_hovered, editor->nodes);
         node_selected = 0;
         node = 0;
