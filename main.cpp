@@ -73,8 +73,13 @@ static const char *LogicNodeName[] = {
 };
 
 struct NodeIndex {
-  uint16_t block_index;
-  uint16_t node_index;
+  union { 
+    struct {
+      uint16_t block_index;
+      uint16_t node_index;
+    };
+    uint32_t combined;
+  };
 };
 
 struct NodeConnection {
@@ -98,15 +103,12 @@ struct EditorNode {
   LogicNodeType type;
   size_t input_count;
   size_t output_count;
-
   ImVec2 position;
   ImVec2 size;
-
   uint8_t input_was_set[2];
   uint8_t input_state[2];
   NodeConnection inputConnections[2];
   DynamicArray<NodeConnection> outputConnections;
-
   uint8_t signal_state;
   ImVec2 GetInputSlotPos(int slot_no) const   { return ImVec2(position.x, position.y + size.y * ((float)slot_no+1) / ((float)2+1)); }
   ImVec2 GetOutputSlotPos(int slot_no) const  { return ImVec2(position.x + size.x, position.y + size.y * ((float)slot_no+1) / ((float)1+1)); }
@@ -196,6 +198,7 @@ EditorNode* CreateNode(LogicNodeType type, Editor *editor){
     } break;
   }
 
+  node->size = ImVec2(64, 64);
   return node;
 }
 
@@ -210,6 +213,7 @@ void DeleteNode(NodeIndex index, Editor *editor){
   block->currentOccupiedCount -= 1;
 }
 
+static inline
 EditorNode *GetNode(NodeIndex index, Editor *editor){
   assert(index.block_index < editor->nodeBlocks.count);
   NodeBlock *block = editor->nodeBlocks[index.block_index];
@@ -218,11 +222,11 @@ EditorNode *GetNode(NodeIndex index, Editor *editor){
   return result;
 }
 
-
 static inline void SimulateNode(EditorNode *node, Editor *editor);
 
 static inline
 void TransmitOutputAndSimulateConnectedNodes(EditorNode *node, uint8_t outputState, Editor *editor){
+  node->signal_state = outputState;
   for(size_t i = 0; i < node->outputConnections.count; i++){
     NodeConnection *connection = &node->outputConnections[i];
     EditorNode *connectedNode = GetNode(connection->node_index, editor);
@@ -293,27 +297,6 @@ void SimulationStep(Editor *editor){
 }
 
 static inline
-void DrawEditorNode(EditorNode *node){
-  switch(node->type){
-    case LogicNodeType_INPUT:{
-      const char *text = node->signal_state ? "1" : "0";
-      if(ImGui::Button(text, ImVec2(32, 32))){
-        node->signal_state = !node->signal_state;
-      }
-    }break;
-
-    case LogicNodeType_OUTPUT:{
-      const char *text = node->signal_state ? "1" : "0";
-      ImGui::Text(text);
-    }break;
-
-    default:{
-      ImGui::Text(LogicNodeName[node->type]);
-    } break;
-  }
-}
-
-static inline
 void iterate_nodes(NodeBlock **blocks, size_t count, std::function<void(EditorNode*, NodeIndex)> procedure){
   for(size_t i = 0; i < count; i++){ 
     NodeBlock *block = blocks[i]; 
@@ -327,10 +310,17 @@ void iterate_nodes(NodeBlock **blocks, size_t count, std::function<void(EditorNo
 }
 
 void DrawEditor(Editor *editor){
-  static const float NODE_SLOT_RADIUS = 6.0f;
-  static const ImVec2 NODE_WINDOW_PADDING(16.0f, 16.0f);
   static const ImU32 GRID_COLOR = ImColor(200,200,200,40);
-  static const float GRID_SIZE = 32.0f;
+  static const float GRID_SIZE = 16.0f;
+  static const float NODE_SLOT_RADIUS = 6.0f;
+  static const ImVec2 NODE_WINDOW_PADDING(8.0f, 8.0f);
+
+  static const ImColor CONNECTION_DEFAULT_COLOR = ImColor(150,50,50);
+  static const ImColor CONNECTION_ACTIVE_COLOR = ImColor(220, 220, 110);
+
+  static const ImColor NODE_BACKGROUND_DEFAULT_COLOR = ImColor(75,75,75);
+  static const ImColor NODE_BACKGROUND_HOVER_COLOR = ImColor(60,60,60);
+  static const ImColor NODE_OUTLINE_COLOR = ImColor(100,100,100);
 
   static ImVec2 scrolling = ImVec2(0.0f, 0.0f);
 
@@ -389,22 +379,42 @@ void DrawEditor(Editor *editor){
       ImVec2 p1 = offset + a->GetOutputSlotPos(0);
       EditorNode *b = GetNode(a->outputConnections[n].node_index, editor);
       ImVec2 p2 = offset + b->GetInputSlotPos(a->outputConnections[n].io_index);
-      draw_list->AddBezierCurve(p1, p1+ImVec2(+50,0), p2+ImVec2(-50,0), p2, ImColor(200,200,100), 3.0f);
+      auto color = a->signal_state ? CONNECTION_ACTIVE_COLOR : CONNECTION_DEFAULT_COLOR;
+      draw_list->AddBezierCurve(p1, p1+ImVec2(+50,0), p2+ImVec2(-50,0), p2, color, 3.0f);
     }
   });
 
   iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
-    //TODO(Torin) Could be problem
-    ImGui::PushID(index.node_index);
-    
-    ImVec2 node_rect_min = offset + node->position;
+    ImGui::PushID(index.combined);
     draw_list->ChannelsSetCurrent(1); // Foreground
-    ImGui::SetCursorScreenPos(node_rect_min + NODE_WINDOW_PADDING);
-    ImGui::BeginGroup(); // Lock horizontal position
-    DrawEditorNode(node);
+
+    ImGui::BeginGroup();
+    ImVec2 node_rect_min = offset + node->position;
+    ImGui::SetCursorScreenPos(node_rect_min + ImVec2(24, 24));
+    switch(node->type){
+      case LogicNodeType_INPUT:{
+        ImGui::SetCursorScreenPos(node_rect_min + ImVec2(4, 4));
+        const char *text = node->signal_state ? "1" : "0";
+        auto color = node->signal_state ? CONNECTION_ACTIVE_COLOR : CONNECTION_DEFAULT_COLOR;
+        //ImGui::PushStyleColor(ImGuiCol_Button, color);
+        if(ImGui::Button(text, ImVec2(54, 54))){
+          node->signal_state = !node->signal_state;
+        }
+        //ImGui::PopStyleColor();
+      }break;
+
+      case LogicNodeType_OUTPUT:{
+        const char *text = node->signal_state ? "1" : "0";
+        ImGui::Text(text);
+      }break;
+
+      default:{
+        ImGui::Text(LogicNodeName[node->type]);
+      } break;
+    }
     ImGui::EndGroup();
 
-    node->size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
+    //node->size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
     ImVec2 node_rect_max = node_rect_min + node->size;
 
     // Display node box
@@ -425,9 +435,9 @@ void DrawEditor(Editor *editor){
     if(node_moving_active && ImGui::IsMouseDragging(0))
       node->position = node->position + ImGui::GetIO().MouseDelta;
 
-    ImU32 node_bg_color = (node_hovered == index || node_selected == index) ? ImColor(75,75,75) : ImColor(60,60,60);
+    ImU32 node_bg_color = (node_hovered == index || node_selected == index) ? NODE_BACKGROUND_HOVER_COLOR : NODE_BACKGROUND_DEFAULT_COLOR;
     draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 4.0f); 
-    draw_list->AddRect(node_rect_min, node_rect_max, ImColor(100,100,100), 4.0f);
+    draw_list->AddRect(node_rect_min, node_rect_max, NODE_OUTLINE_COLOR, 4.0f);
     ImGui::PopID();
   });
   draw_list->ChannelsMerge();
@@ -436,12 +446,11 @@ void DrawEditor(Editor *editor){
 
   //Draw and Update Node IO slots
   iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
+    ImGui::PushID(index.combined);
+
     ImVec2 node_rect_min = offset + node->position - ImVec2(12,12);
     ImGui::SetCursorScreenPos(node_rect_min);
     ImVec2 size = ImVec2(node->size.x + 32, node->size.x + 32);
-
-    //TODO(Torin) This might cause problems
-    ImGui::PushID(index.node_index);
     ImGui::InvisibleButton("##node", size);
 
     bool hovered_slot_is_input = false;
@@ -490,7 +499,6 @@ void DrawEditor(Editor *editor){
       draw_list->AddCircleFilled(offset + node->GetOutputSlotPos(slot_idx), NODE_SLOT_RADIUS, color);
     }
       
-
     if(hovered_slot_index != -1){
       if(ImGui::IsMouseDoubleClicked(0)){
         if(hovered_slot_is_input == false){
@@ -512,10 +520,9 @@ void DrawEditor(Editor *editor){
           EditorNode *destNode = node;
 
           if(!IsValid(destNode->inputConnections[hovered_slot_index].node_index)){
-            //TODO(Torin) Creating a output connection that goes to the same input
-            // **SHOULD** be imposible but make sure thats true
-            //TODO(Torin) ^^^^^ ASSUMTION IS WRONG WRONG WRONG FIX FIX FIX
-            //TODO(Torin) ^^^^^^^ NOW THE FIRST CASE IS TRUE AGAIN IGNORE SECOND LINE
+            //TODO(Torin) Insure that an output connection cannot have two connections to the same input
+            //It appears that this is currently imposible already **BUT** only because single input sources
+            //are allowed
 
             NodeConnection outputToInput = {};
             outputToInput.node_index = index;
