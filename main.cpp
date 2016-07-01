@@ -52,8 +52,9 @@ static const char *LogicNodeName[] = {
 };
 
 struct NodeConnection {
+  uint16_t block_index;
   uint32_t node_index;
-  uint32_t slot_index;
+  uint32_t io_index;
 };
 
 //NOTE(Torin) This EditorNode is used to represent nodes only within the editor
@@ -88,37 +89,72 @@ struct EditorNode {
   ImVec2 GetOutputSlotPos(int slot_no) const  { return ImVec2(position.x + size.x, position.y + size.y * ((float)slot_no+1) / ((float)1+1)); }
 };
 
+struct NodeBlock {
+  static const size_t NODE_COUNT = 256;
+  size_t currentOccupiedCount;
+  uint8_t isOccupied[NODE_COUNT];
+  EditorNode nodes[NODE_COUNT];
+};
+
 struct Editor {
-  DynamicArray<EditorNode> nodes;
+  DynamicArray<NodeBlock *> nodeBlocks;
   DynamicArray<uint32_t> selectedNodes;
 };
 
 #define INVALID_NODE_ID UINT32_MAX
 
-EditorNode* CreateNode(LogicNodeType type, Editor *editor){
-  EditorNode node = {};
-  node.type = type;
-  switch(node.type){
+EditorNode *GetNextAvailableNode(Editor *editor){
+  for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
+    NodeBlock *block = &editor->nodeBlocks[blockIndex];
+    if(block->currentOccupiedCount != NODE_COUNT){
+      for(size_t nodeIndex; nodeIndex < NodeBlock::NODE_COUNT; i++){
+        if(!block->isOccupied[nodeIndex]){
+          return &block->nodes[nodeIndex];
+        }
+      }
+    }
+  }
 
+  NodeMemoryBlock *block = (NodeMemoryBlock *)malloc(sizeof(NodeMemoryBlock));
+  memset(block, 0, sizeof(NodeMemoryBlock));
+  ArrayAdd(block, editor->nodeBlocks);
+  return GetNextAvailableNode(editor);
+}
+
+EditorNode* CreateNode(LogicNodeType type, Editor *editor){
+  EditorNode *node = GetNextAvailableNode(editor);
+  node->type = type;
+
+  switch(node->type){
     case LogicNodeType_INPUT:{
-      node.input_count = 0;
-      node.output_count = 1;
+      node->input_count = 0;
+      node->output_count = 1;
     } break;
 
     case LogicNodeType_OUTPUT: {
-      node.input_count = 1;
-      node.output_count = 0;
+      node->input_count = 1;
+      node->output_count = 0;
     }break;
 
     default: {
-      node.input_count = 2;
-      node.output_count = 1;
+      node->input_count = 2;
+      node->output_count = 1;
     } break;
   }
 
+  return node;
+}
 
-  ArrayAdd(node, editor->nodes);
-  return &editor->nodes[editor->nodes.count-1];
+EditorNode *GetNode(uint32_t block_index, uint32_t node_index, Editor *editor){
+  assert(block_index < editor->nodeBlocks.count);
+  NodeBlock *block = &editor->nodeBlocks[block_index];
+  assert(node_index < NodeBlock::NODE_COUNT);
+  EditorNode *result = &block->nodes[node_index];
+  return result;
+}
+
+EditorNode *GetNode(const NodeConnection& connection, Editor *editor){
+  return GetNode(connection.block_index, connection.node_index, editor);
 }
 
 static inline void SimulateNode(EditorNode *node, Editor *editor);
@@ -140,7 +176,7 @@ void SimulateNode(EditorNode *node, Editor *editor){
     case LogicNodeType_INPUT: {
       for(size_t connectionIndex = 0; connectionIndex < node->outputConnections.count; connectionIndex++){
         auto& connection = node->outputConnections[connectionIndex];
-        EditorNode *connectedNode = &editor->nodes[node->outputConnections[connectionIndex].node_index];
+        EditorNode *connectedNode = GetNode(connection, editor);
         connectedNode->input_state[connection.slot_index] = node->signal_state;
         connectedNode->input_was_set[connection.slot_index] = 1;
       }
@@ -176,11 +212,17 @@ void SimulateNode(EditorNode *node, Editor *editor){
   }
 }
 
+//TODO(Torin) Why should this care about an editor ptr
+//Just directly pass the node block array it signals intent better
 static inline
 void SimulationStep(Editor *editor){
-  for(size_t rootNodeIndex = 0; rootNodeIndex < editor->nodes.count; rootNodeIndex++){
-    EditorNode *node = &editor->nodes[rootNodeIndex];
-    SimulateNode(node, editor);
+  for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
+    NodeBlock *block = &editor->nodeBlocks[blockIndex];
+    for(size_t nodeIndex = 0; nodeIndex < NodeBlock::NODE_COUNT; nodeIndex++){
+      if(block->isOccupied[nodeIndex]){
+        SimulateNode(&block->nodes[nodeIndex]);
+      }
+    }
   }
 }
 
@@ -204,6 +246,20 @@ void DrawEditorNode(EditorNode *node){
     } break;
   }
 }
+
+static inline
+void iterate_nodes(NodeBlock *blocks, size_t count, std::function<void(EditorNode*, size_t)> procedure){
+  for(size_t i = 0; i < count; i++){ 
+    NodeBlock *block = &blockarray[i]; 
+    for(size_t n = 0; n < NodeBlock::NODE_COUNT; n++){ 
+      if(block->isOccupied[n]) {
+        procedure(&block->nodes[n], n);
+      }
+    }
+  }
+}
+
+
 
 void DrawEditor(Editor *editor){
   static const float NODE_SLOT_RADIUS = 6.0f;
@@ -262,18 +318,17 @@ void DrawEditor(Editor *editor){
 
   // Display links
   draw_list->ChannelsSetCurrent(0); // Background
-  for(size_t i = 0; i < editor->nodes.count; i++){
-    EditorNode *a = &editor->nodes[i];
+
+  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [](EditorNode *a, size_t i){
     for(size_t n = 0; n < a->outputConnections.count; n++){
       ImVec2 p1 = offset + a->GetOutputSlotPos(0);
       EditorNode *b = &editor->nodes[a->outputConnections[n].node_index];
       ImVec2 p2 = offset + b->GetInputSlotPos(a->outputConnections[n].slot_index);
       draw_list->AddBezierCurve(p1, p1+ImVec2(+50,0), p2+ImVec2(-50,0), p2, ImColor(200,200,100), 3.0f);
     }
-  }
+  });
 
-  //Draw nodes
-  for(size_t i = 0; i < editor->nodes.count; i++){
+  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [](EditorNode *node, size_t i){
     ImGui::PushID(i);
     EditorNode *node = &editor->nodes[i];
     
@@ -309,7 +364,7 @@ void DrawEditor(Editor *editor){
     draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 4.0f); 
     draw_list->AddRect(node_rect_min, node_rect_max, ImColor(100,100,100), 4.0f);
     ImGui::PopID();
-  }
+  });
   draw_list->ChannelsMerge();
 
 
