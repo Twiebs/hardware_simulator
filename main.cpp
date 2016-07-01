@@ -3,6 +3,8 @@
 #define QUICKAPP_RENDER
 #include "QuickApp.h"
 
+#pragma clang diagnostic ignored "-Wformat-security"
+
 template<typename T>
 struct DynamicArray {
   size_t capacity;
@@ -34,6 +36,25 @@ void ArrayRemoveAtIndexUnordered(const size_t index, DynamicArray<T>& array){
   array.count -= 1;
 }
 
+template<typename T>
+void ArrayRemoveValueUnordered(const T& t, DynamicArray<T>& array){
+  for(size_t i = 0; i < array->count; i++){
+    if(array->data[i] == t) {
+      array->data[i] = array->data[array->count - 1];
+      array->count -= 1;
+      return;
+    }
+    assert(false);
+  }
+}
+
+template<typename T>
+void ArrayDestroy(DynamicArray<T>& array){
+  if(array.data != 0) free(array.data);
+  array.count = 0;
+  array.capacity = 0;
+}
+
 enum LogicNodeType {
   LogicNodeType_AND,
   LogicNodeType_OR,
@@ -51,9 +72,13 @@ static const char *LogicNodeName[] = {
   "OUTPUT",
 };
 
-struct NodeConnection {
+struct NodeIndex {
   uint16_t block_index;
-  uint32_t node_index;
+  uint16_t node_index;
+};
+
+struct NodeConnection {
+  NodeIndex node_index;
   uint32_t io_index;
 };
 
@@ -79,9 +104,7 @@ struct EditorNode {
 
   uint8_t input_was_set[2];
   uint8_t input_state[2];
-  //NOTE(Torin) somthing like this needs to be stored for when nodes are deleted
-  DynamicArray<NodeConnection> inputConnections;
-  //TODO(Torin) This should really be a DArray of DArrays for outputConections
+  NodeConnection inputConnections[2];
   DynamicArray<NodeConnection> outputConnections;
 
   uint8_t signal_state;
@@ -98,31 +121,62 @@ struct NodeBlock {
 
 struct Editor {
   DynamicArray<NodeBlock *> nodeBlocks;
-  DynamicArray<uint32_t> selectedNodes;
+  DynamicArray<NodeIndex> selectedNodes;
 };
 
-#define INVALID_NODE_ID UINT32_MAX
+static inline
+bool IsValid(NodeIndex index){
+  bool result = (index.node_index != UINT16_MAX && index.block_index != UINT16_MAX); 
+  return result;
+}
 
+static inline
+NodeIndex InvalidNodeIndex(){
+  NodeIndex result;
+  result.block_index = UINT16_MAX;
+  result.node_index = UINT16_MAX;
+  return result;
+}
+
+static inline 
+bool operator==(const NodeIndex& a, const NodeIndex& b){
+  if(a.block_index != b.block_index) return 0;
+  if(a.node_index != b.node_index) return 0;
+  return 1;
+}
+
+static inline 
+bool operator!=(const NodeIndex& a, const NodeIndex& b){
+  if(a.block_index == b.block_index && a.node_index == b.node_index) return 0;
+  return 1;
+}
+
+
+static inline
 EditorNode *GetNextAvailableNode(Editor *editor){
   for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
-    NodeBlock *block = &editor->nodeBlocks[blockIndex];
-    if(block->currentOccupiedCount != NODE_COUNT){
-      for(size_t nodeIndex; nodeIndex < NodeBlock::NODE_COUNT; i++){
+    NodeBlock *block = editor->nodeBlocks[blockIndex];
+    if(block->currentOccupiedCount != NodeBlock::NODE_COUNT){
+      for(size_t nodeIndex; nodeIndex < NodeBlock::NODE_COUNT; nodeIndex++){
         if(!block->isOccupied[nodeIndex]){
+          block->isOccupied[nodeIndex] = 1;
+          block->currentOccupiedCount++;
           return &block->nodes[nodeIndex];
         }
       }
     }
   }
 
-  NodeMemoryBlock *block = (NodeMemoryBlock *)malloc(sizeof(NodeMemoryBlock));
-  memset(block, 0, sizeof(NodeMemoryBlock));
+  NodeBlock*block = (NodeBlock *)malloc(sizeof(NodeBlock));
+  memset(block, 0, sizeof(NodeBlock));
   ArrayAdd(block, editor->nodeBlocks);
   return GetNextAvailableNode(editor);
 }
 
 EditorNode* CreateNode(LogicNodeType type, Editor *editor){
   EditorNode *node = GetNextAvailableNode(editor);
+  node->inputConnections[0].node_index = InvalidNodeIndex();
+  node->inputConnections[1].node_index = InvalidNodeIndex();
   node->type = type;
 
   switch(node->type){
@@ -145,27 +199,35 @@ EditorNode* CreateNode(LogicNodeType type, Editor *editor){
   return node;
 }
 
-EditorNode *GetNode(uint32_t block_index, uint32_t node_index, Editor *editor){
-  assert(block_index < editor->nodeBlocks.count);
-  NodeBlock *block = &editor->nodeBlocks[block_index];
-  assert(node_index < NodeBlock::NODE_COUNT);
-  EditorNode *result = &block->nodes[node_index];
+static inline
+void DeleteNode(NodeIndex index, Editor *editor){
+  assert(index.block_index < editor->nodeBlocks.count);
+  assert(index.node_index < NodeBlock::NODE_COUNT);
+  NodeBlock *block = editor->nodeBlocks[index.block_index];
+  block->isOccupied[index.node_index] = 0;
+  ArrayDestroy(block->nodes[index.node_index].outputConnections);
+  memset(&block->nodes[index.node_index], 0, sizeof(EditorNode));
+  block->currentOccupiedCount -= 1;
+}
+
+EditorNode *GetNode(NodeIndex index, Editor *editor){
+  assert(index.block_index < editor->nodeBlocks.count);
+  NodeBlock *block = editor->nodeBlocks[index.block_index];
+  assert(index.node_index < NodeBlock::NODE_COUNT);
+  EditorNode *result = &block->nodes[index.node_index];
   return result;
 }
 
-EditorNode *GetNode(const NodeConnection& connection, Editor *editor){
-  return GetNode(connection.block_index, connection.node_index, editor);
-}
 
 static inline void SimulateNode(EditorNode *node, Editor *editor);
 
 static inline
-void TransmitOutputStateAndSimulateConnectedNodes(EditorNode *node, uint8_t outputState, Editor *editor){
+void TransmitOutputAndSimulateConnectedNodes(EditorNode *node, uint8_t outputState, Editor *editor){
   for(size_t i = 0; i < node->outputConnections.count; i++){
-    auto &connection = node->outputConnections[i];
-    EditorNode *connectedNode = &editor->nodes[connection.node_index];
-    connectedNode->input_state[connection.slot_index] = outputState;
-    connectedNode->input_was_set[connection.slot_index] = 1;
+    NodeConnection *connection = &node->outputConnections[i];
+    EditorNode *connectedNode = GetNode(connection->node_index, editor);
+    connectedNode->input_state[connection->io_index] = outputState;
+    connectedNode->input_was_set[connection->io_index] = 1;
     SimulateNode(connectedNode, editor);
   }
 }
@@ -175,10 +237,10 @@ void SimulateNode(EditorNode *node, Editor *editor){
   switch(node->type){
     case LogicNodeType_INPUT: {
       for(size_t connectionIndex = 0; connectionIndex < node->outputConnections.count; connectionIndex++){
-        auto& connection = node->outputConnections[connectionIndex];
-        EditorNode *connectedNode = GetNode(connection, editor);
-        connectedNode->input_state[connection.slot_index] = node->signal_state;
-        connectedNode->input_was_set[connection.slot_index] = 1;
+        NodeConnection *connection = &node->outputConnections[connectionIndex];
+        EditorNode *connectedNode = GetNode(connection->node_index, editor);
+        connectedNode->input_state[connection->io_index] = node->signal_state;
+        connectedNode->input_was_set[connection->io_index] = 1;
       }
     }break;
 
@@ -192,14 +254,14 @@ void SimulateNode(EditorNode *node, Editor *editor){
       if(node->input_was_set[0] == 0) return;
       if(node->input_was_set[1] == 0) return;
       uint8_t output_signal = node->input_state[0] && node->input_state[1];
-      TransmitOutputStateAndSimulateConnectedNodes(node, output_signal, editor);
+      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
     } break;
 
     case LogicNodeType_OR:{
       if(node->input_was_set[0] == 0) return;
       if(node->input_was_set[1] == 0) return;
       uint8_t output_signal = node->input_state[0] || node->input_state[1];
-      TransmitOutputStateAndSimulateConnectedNodes(node, output_signal, editor);
+      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
     }break;
 
     case LogicNodeType_XOR:{
@@ -207,7 +269,11 @@ void SimulateNode(EditorNode *node, Editor *editor){
       if(node->input_was_set[1] == 0) return;
       uint8_t output_signal = node->input_state[0] || node->input_state[1];
       output_signal = output_signal && !(node->input_state[0] && node->input_state[1]);
-      TransmitOutputStateAndSimulateConnectedNodes(node, output_signal, editor);
+      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
+    }break;
+
+    default: {
+      assert(false);
     }break;
   }
 }
@@ -217,10 +283,10 @@ void SimulateNode(EditorNode *node, Editor *editor){
 static inline
 void SimulationStep(Editor *editor){
   for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
-    NodeBlock *block = &editor->nodeBlocks[blockIndex];
+    NodeBlock *block = editor->nodeBlocks[blockIndex];
     for(size_t nodeIndex = 0; nodeIndex < NodeBlock::NODE_COUNT; nodeIndex++){
       if(block->isOccupied[nodeIndex]){
-        SimulateNode(&block->nodes[nodeIndex]);
+        SimulateNode(&block->nodes[nodeIndex], editor);
       }
     }
   }
@@ -248,18 +314,17 @@ void DrawEditorNode(EditorNode *node){
 }
 
 static inline
-void iterate_nodes(NodeBlock *blocks, size_t count, std::function<void(EditorNode*, size_t)> procedure){
+void iterate_nodes(NodeBlock **blocks, size_t count, std::function<void(EditorNode*, NodeIndex)> procedure){
   for(size_t i = 0; i < count; i++){ 
-    NodeBlock *block = &blockarray[i]; 
+    NodeBlock *block = blocks[i]; 
     for(size_t n = 0; n < NodeBlock::NODE_COUNT; n++){ 
       if(block->isOccupied[n]) {
-        procedure(&block->nodes[n], n);
+        NodeIndex index = { (uint16_t)i, (uint16_t)n };
+        procedure(&block->nodes[n], index);
       }
     }
   }
 }
-
-
 
 void DrawEditor(Editor *editor){
   static const float NODE_SLOT_RADIUS = 6.0f;
@@ -282,13 +347,13 @@ void DrawEditor(Editor *editor){
   bool open_context_menu = false;
   
   static bool is_context_menu_open = false;
-  static int node_hovered = -1;
-  static int node_selected = -1;
-  static int dragNodeIndex = -1;
+  static NodeIndex node_hovered = InvalidNodeIndex();
+  static NodeIndex dragNodeIndex = InvalidNodeIndex();
+  static NodeIndex node_selected = InvalidNodeIndex();
   static int dragSlotIndex = -1;
 
   if(is_context_menu_open == false){
-    node_hovered = -1;
+    node_hovered = InvalidNodeIndex();
   }
 
 
@@ -319,18 +384,18 @@ void DrawEditor(Editor *editor){
   // Display links
   draw_list->ChannelsSetCurrent(0); // Background
 
-  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [](EditorNode *a, size_t i){
+  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *a, NodeIndex index){
     for(size_t n = 0; n < a->outputConnections.count; n++){
       ImVec2 p1 = offset + a->GetOutputSlotPos(0);
-      EditorNode *b = &editor->nodes[a->outputConnections[n].node_index];
-      ImVec2 p2 = offset + b->GetInputSlotPos(a->outputConnections[n].slot_index);
+      EditorNode *b = GetNode(a->outputConnections[n].node_index, editor);
+      ImVec2 p2 = offset + b->GetInputSlotPos(a->outputConnections[n].io_index);
       draw_list->AddBezierCurve(p1, p1+ImVec2(+50,0), p2+ImVec2(-50,0), p2, ImColor(200,200,100), 3.0f);
     }
   });
 
-  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [](EditorNode *node, size_t i){
-    ImGui::PushID(i);
-    EditorNode *node = &editor->nodes[i];
+  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
+    //TODO(Torin) Could be problem
+    ImGui::PushID(index.node_index);
     
     ImVec2 node_rect_min = offset + node->position;
     draw_list->ChannelsSetCurrent(1); // Foreground
@@ -348,7 +413,7 @@ void DrawEditor(Editor *editor){
     ImGui::InvisibleButton("node", node->size);
     
     if(ImGui::IsItemHovered()){
-      node_hovered = i;
+      node_hovered = index;
       if(ImGui::IsMouseClicked(1)) {
         open_context_menu = 1;
       }
@@ -356,11 +421,11 @@ void DrawEditor(Editor *editor){
 
     bool node_moving_active = ImGui::IsItemActive();
     if(node_moving_active)
-      node_selected = i;
+      node_selected = index;
     if(node_moving_active && ImGui::IsMouseDragging(0))
       node->position = node->position + ImGui::GetIO().MouseDelta;
 
-    ImU32 node_bg_color = (node_hovered == i || node_selected == i) ? ImColor(75,75,75) : ImColor(60,60,60);
+    ImU32 node_bg_color = (node_hovered == index || node_selected == index) ? ImColor(75,75,75) : ImColor(60,60,60);
     draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 4.0f); 
     draw_list->AddRect(node_rect_min, node_rect_max, ImColor(100,100,100), 4.0f);
     ImGui::PopID();
@@ -370,20 +435,17 @@ void DrawEditor(Editor *editor){
 
 
   //Draw and Update Node IO slots
-  for(size_t i = 0; i < editor->nodes.count; i++){
-    EditorNode *node = &editor->nodes[i];
-
+  iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
     ImVec2 node_rect_min = offset + node->position - ImVec2(12,12);
     ImGui::SetCursorScreenPos(node_rect_min);
     ImVec2 size = ImVec2(node->size.x + 32, node->size.x + 32);
 
-
-    ImGui::PushID(i);
+    //TODO(Torin) This might cause problems
+    ImGui::PushID(index.node_index);
     ImGui::InvisibleButton("##node", size);
 
     bool hovered_slot_is_input = false;
     int hovered_slot_index = -1;
-
 
     //TODO(Torin) HACK imgui is not returning true on any of these when it should so were checking every single
     //node and its io slots for intersection on a mouse click
@@ -434,53 +496,56 @@ void DrawEditor(Editor *editor){
         if(hovered_slot_is_input == false){
           for(size_t i = 0; i < node->outputConnections.count; i++){
             NodeConnection *connection = &node->outputConnections[i];
-            EditorNode *destNode = &editor->nodes[connection->node_index];
-            ArrayRemoveAtIndexUnordered(connection->slot_index, destNode->inputConnections);
+            EditorNode *destNode = GetNode(connection->node_index, editor);
+            destNode->inputConnections[connection->io_index].node_index = InvalidNodeIndex();
           }
+
           node->outputConnections.count = 0;
-          dragNodeIndex = -1;
+          dragNodeIndex = InvalidNodeIndex();
         }
       } else if(ImGui::IsMouseClicked(0)){
-        if(dragNodeIndex == -1 && !hovered_slot_is_input){
-          dragNodeIndex = i;
+        if(!IsValid(dragNodeIndex) && !hovered_slot_is_input){
+          dragNodeIndex = index;
           dragSlotIndex = hovered_slot_index;
-        } else if (dragNodeIndex != -1 && dragNodeIndex != i && hovered_slot_is_input){
-          EditorNode *sourceNode = &editor->nodes[dragNodeIndex];
+        } else if (IsValid(dragNodeIndex) && dragNodeIndex != index && hovered_slot_is_input){
+          EditorNode *sourceNode = GetNode(dragNodeIndex, editor);
           EditorNode *destNode = node;
 
-          //TODO(Torin) Creating a output connection that goes to the same input
-          // **SHOULD** be imposible but make sure thats true
-          //TODO(Torin) ^^^^^ ASSUMTION IS WRONG WRONG WRONG FIX FIX FIX
+          if(!IsValid(destNode->inputConnections[hovered_slot_index].node_index)){
+            //TODO(Torin) Creating a output connection that goes to the same input
+            // **SHOULD** be imposible but make sure thats true
+            //TODO(Torin) ^^^^^ ASSUMTION IS WRONG WRONG WRONG FIX FIX FIX
+            //TODO(Torin) ^^^^^^^ NOW THE FIRST CASE IS TRUE AGAIN IGNORE SECOND LINE
 
-          NodeConnection outputToInput = {};
-          outputToInput.node_index = i;
-          outputToInput.slot_index = hovered_slot_index;
-          ArrayAdd(outputToInput, sourceNode->outputConnections);
+            NodeConnection outputToInput = {};
+            outputToInput.node_index = index;
+            outputToInput.io_index = hovered_slot_index;
+            ArrayAdd(outputToInput, sourceNode->outputConnections);
 
-          NodeConnection inputToOutput;
-          inputToOutput.node_index = dragNodeIndex;
-          inputToOutput.slot_index = 0; //TODO(Torin) Only one output currently supported
-          ArrayAdd(inputToOutput, destNode->inputConnections);
+            NodeConnection inputToOutput;
+            inputToOutput.node_index = dragNodeIndex;
+            inputToOutput.io_index = 0; //TODO(Torin) Only one output currently supported
+            destNode->inputConnections[hovered_slot_index] = inputToOutput;
 
-          dragNodeIndex = -1;
+            dragNodeIndex = InvalidNodeIndex();
+          }
         }
       }
     }
-    
     ImGui::PopID();
-  }
+  });
 
   //@Dragging 
-  if(dragNodeIndex != -1){
-    EditorNode *sourceNode = &editor->nodes[dragNodeIndex];
+  if(IsValid(dragNodeIndex)){
+    EditorNode *sourceNode = GetNode(dragNodeIndex, editor);
     ImVec2 p1 = ImGui::GetMousePos();
     ImVec2 p2 = offset + sourceNode->GetOutputSlotPos(dragSlotIndex);
     draw_list->AddBezierCurve(p1, p1+ImVec2(+50,0), p2+ImVec2(-50,0), p2, ImColor(200,200,100), 3.0f);
   }
 
   if(ImGui::IsMouseClicked(1) && ImGui::IsMouseDown(1)){
-    if(dragNodeIndex != -1){
-      dragNodeIndex = -1;
+    if(IsValid(dragNodeIndex)){
+      dragNodeIndex = InvalidNodeIndex();
     } else {
       open_context_menu = 1;
     }
@@ -495,26 +560,36 @@ void DrawEditor(Editor *editor){
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
   if(ImGui::BeginPopup("context_menu")){
     ImVec2 scene_pos = ImGui::GetMousePosOnOpeningCurrentPopup() - offset;
-    if(node_hovered != -1){
-      EditorNode *node = &editor->nodes[node_hovered];
+    if(IsValid(node_hovered)){
+      EditorNode *node = GetNode(node_hovered, editor);
       if(ImGui::MenuItem("Delete")){
-        //TODO(Torin) Refactor!!! inputConnections does not need to be dynamic for basic node types
-        assert(node->inputConnections.count <= node->input_count);
-        for(size_t i = 0; i < node->inputConnections.count; i++){
+
+        for(size_t i = 0; i < node->input_count; i++){
           NodeConnection *connection = &node->inputConnections[i];
-          EditorNode *inputSource = &editor->nodes[connection->node_index];
-          ArrayRemoveAtIndexUnordered(connection->slot_index, inputSource->outputConnections);
+          if(IsValid(connection->node_index) == false) continue;
+
+          EditorNode *inputSource = GetNode(connection->node_index, editor);
+          
+          bool wasConnectionRemoved = false;
+          for(size_t n = 0; n < inputSource->outputConnections.count; n++){
+            NodeConnection *ioConnection = &inputSource->outputConnections[n];
+            if((ioConnection->node_index == node_hovered) && ioConnection->io_index == i){
+              ArrayRemoveAtIndexUnordered(n, inputSource->outputConnections);
+              wasConnectionRemoved = true;              
+            }
+          }
+
+          assert(wasConnectionRemoved && "inputConnection did not match any outputConnection");
         }
 
         for(size_t i = 0; i < node->outputConnections.count; i++){
           NodeConnection *connection = &node->outputConnections[i];
-          EditorNode *connectionDest = &editor->nodes[connection->node_index];
-          ArrayRemoveAtIndexUnordered(connection->slot_index, connectionDest->inputConnections);
+          EditorNode *connectionDest = GetNode(connection->node_index, editor);
+          connectionDest->inputConnections[connection->io_index].node_index = InvalidNodeIndex();
         }
 
-        ArrayRemoveAtIndexUnordered(node_hovered, editor->nodes);
-        node_selected = 0;
-        node = 0;
+        DeleteNode(node_hovered, editor);
+        node_selected = InvalidNodeIndex();
       }
     }
     else {
