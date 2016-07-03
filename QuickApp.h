@@ -300,19 +300,6 @@ void ImGui_ImplSdl_NewFrame(SDL_Window *window)
 
 #endif//QUICKAPP_IMGUI
 
-namespace QuickApp {
-void DrawRect(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-  
-
-  SDL_SetRenderDrawColor(QuickAppInternal::renderer, r, g, b, a);
-  SDL_Rect rect { x, y, w, h};
-  SDL_RenderFillRect(QuickAppInternal::renderer, &rect);
-}
-};
-
-
-
-
 int QuickAppStart(const char *title, int width, int height){
   if(SDL_Init(SDL_INIT_VIDEO) != 0) return 0;
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);

@@ -48,6 +48,16 @@ void ArrayRemoveValueUnordered(const T& t, DynamicArray<T>& array){
   }
 }
 
+template <typename T>
+int ArrayContains(const T& value, DynamicArray<T>& array){
+  for(size_t i = 0; i < array.count; i++){
+    if(array.data[i] == value){
+      return 1;
+    }
+  }
+  return 0;
+}
+
 template<typename T>
 void ArrayDestroy(DynamicArray<T>& array){
   if(array.data != 0) free(array.data);
@@ -97,7 +107,7 @@ struct NodeConnection {
 //there max inputs are 2 and their max outputs are 1.  This is a more
 //realisitic yet counterintuitive representation of the data because we
 //can then crush all of the compound nodes into chains of BasicNodes during
-//a preprocess step before the Simulation is run 
+//a preprocess step before the Simulation is run
 
 struct EditorNode {
   LogicNodeType type;
@@ -121,10 +131,41 @@ struct NodeBlock {
   EditorNode nodes[NODE_COUNT];
 };
 
+enum EditorMode {
+  EditorMode_None,
+  EditorMode_SelectBox,
+};
+
 struct Editor {
   DynamicArray<NodeBlock *> nodeBlocks;
   DynamicArray<NodeIndex> selectedNodes;
+  
+  EditorMode mode;
+  union {
+    ImVec2 selectBoxOrigin;
+  };
 };
+
+struct Rectangle {
+  float minX, minY;
+  float maxX, maxY;
+};
+
+int Intersects(const Rectangle& a, const Rectangle& b){
+  if(a.maxX < b.minX || a.minX > b.maxX) return 0;
+  if(a.maxY < b.minY || a.minY > b.maxY) return 0;
+  return 1;
+}
+
+int Max(int a, int b){
+  int result = a > b ? a : b;
+  return result;
+}
+
+int Min(int a, int b){
+  int result = a < b ? a : b;
+  return result;
+}
 
 static inline
 bool IsValid(NodeIndex index){
@@ -152,7 +193,6 @@ bool operator!=(const NodeIndex& a, const NodeIndex& b){
   if(a.block_index == b.block_index && a.node_index == b.node_index) return 0;
   return 1;
 }
-
 
 static inline
 EditorNode *GetNextAvailableNode(Editor *editor){
@@ -203,17 +243,6 @@ EditorNode* CreateNode(LogicNodeType type, Editor *editor){
 }
 
 static inline
-void DeleteNode(NodeIndex index, Editor *editor){
-  assert(index.block_index < editor->nodeBlocks.count);
-  assert(index.node_index < NodeBlock::NODE_COUNT);
-  NodeBlock *block = editor->nodeBlocks[index.block_index];
-  block->isOccupied[index.node_index] = 0;
-  ArrayDestroy(block->nodes[index.node_index].outputConnections);
-  memset(&block->nodes[index.node_index], 0, sizeof(EditorNode));
-  block->currentOccupiedCount -= 1;
-}
-
-static inline
 EditorNode *GetNode(NodeIndex index, Editor *editor){
   assert(index.block_index < editor->nodeBlocks.count);
   NodeBlock *block = editor->nodeBlocks[index.block_index];
@@ -221,6 +250,41 @@ EditorNode *GetNode(NodeIndex index, Editor *editor){
   EditorNode *result = &block->nodes[index.node_index];
   return result;
 }
+
+static inline
+void DeleteNode(NodeIndex index, Editor *editor){
+  assert(index.block_index < editor->nodeBlocks.count);
+  assert(index.node_index < NodeBlock::NODE_COUNT);
+  EditorNode *node = GetNode(index, editor);
+
+  for(size_t i = 0; i < node->input_count; i++){
+    NodeConnection *connection = &node->inputConnections[i];
+    if(IsValid(connection->node_index) == false) continue;
+    EditorNode *inputSource = GetNode(connection->node_index, editor);
+    bool wasConnectionRemoved = false;
+    for(size_t n = 0; n < inputSource->outputConnections.count; n++){
+      NodeConnection *ioConnection = &inputSource->outputConnections[n];
+      if((ioConnection->node_index == index) && ioConnection->io_index == i){
+        ArrayRemoveAtIndexUnordered(n, inputSource->outputConnections);
+        wasConnectionRemoved = true;              
+      }
+    }
+    assert(wasConnectionRemoved && "inputConnection did not match any outputConnection");
+  }
+
+  for(size_t i = 0; i < node->outputConnections.count; i++){
+    NodeConnection *connection = &node->outputConnections[i];
+    EditorNode *connectionDest = GetNode(connection->node_index, editor);
+    connectionDest->inputConnections[connection->io_index].node_index = InvalidNodeIndex();
+  }
+
+  NodeBlock *block = editor->nodeBlocks[index.block_index];
+  block->isOccupied[index.node_index] = 0;
+  ArrayDestroy(block->nodes[index.node_index].outputConnections);
+  memset(&block->nodes[index.node_index], 0, sizeof(EditorNode));
+  block->currentOccupiedCount -= 1;
+}
+
 
 static inline void SimulateNode(EditorNode *node, Editor *editor);
 
@@ -259,7 +323,7 @@ void SimulateNode(EditorNode *node, Editor *editor){
       if(node->input_was_set[1] == 0) return;
       uint8_t output_signal = node->input_state[0] && node->input_state[1];
       TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
-    } break;
+    }break;
 
     case LogicNodeType_OR:{
       if(node->input_was_set[0] == 0) return;
@@ -284,6 +348,8 @@ void SimulateNode(EditorNode *node, Editor *editor){
 
 //TODO(Torin) Why should this care about an editor ptr
 //Just directly pass the node block array it signals intent better
+
+//TODO(Torin) With this model nodes are being simulated more than once
 static inline
 void SimulationStep(Editor *editor){
   for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
@@ -318,8 +384,8 @@ void DrawEditor(Editor *editor){
   static const ImColor CONNECTION_DEFAULT_COLOR = ImColor(150,50,50);
   static const ImColor CONNECTION_ACTIVE_COLOR = ImColor(220, 220, 110);
 
-  static const ImColor NODE_BACKGROUND_DEFAULT_COLOR = ImColor(75,75,75);
-  static const ImColor NODE_BACKGROUND_HOVER_COLOR = ImColor(60,60,60);
+  static const ImColor NODE_BACKGROUND_SELECTED_COLOR = ImColor(90,90,90);
+  static const ImColor NODE_BACKGROUND_DEFAULT_COLOR = ImColor(60,60,60);
   static const ImColor NODE_OUTLINE_COLOR = ImColor(100,100,100);
 
   static ImVec2 scrolling = ImVec2(0.0f, 0.0f);
@@ -339,7 +405,7 @@ void DrawEditor(Editor *editor){
   static bool is_context_menu_open = false;
   static NodeIndex node_hovered = InvalidNodeIndex();
   static NodeIndex dragNodeIndex = InvalidNodeIndex();
-  static NodeIndex node_selected = InvalidNodeIndex();
+
   static int dragSlotIndex = -1;
 
   if(is_context_menu_open == false){
@@ -384,12 +450,13 @@ void DrawEditor(Editor *editor){
     }
   });
 
+  bool nodeWasClicked = false;
   iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
-    ImGui::PushID(index.combined);
-    draw_list->ChannelsSetCurrent(1); // Foreground
-
-    ImGui::BeginGroup();
     ImVec2 node_rect_min = offset + node->position;
+    ImVec2 node_rect_max = node_rect_min + node->size;
+
+    draw_list->ChannelsSetCurrent(1); // Foreground
+    ImGui::BeginGroup();
     ImGui::SetCursorScreenPos(node_rect_min + ImVec2(24, 24));
     switch(node->type){
       case LogicNodeType_INPUT:{
@@ -397,7 +464,7 @@ void DrawEditor(Editor *editor){
         const char *text = node->signal_state ? "1" : "0";
         auto color = node->signal_state ? CONNECTION_ACTIVE_COLOR : CONNECTION_DEFAULT_COLOR;
         //ImGui::PushStyleColor(ImGuiCol_Button, color);
-        if(ImGui::Button(text, ImVec2(54, 54))){
+        if(ImGui::Button(text, ImVec2(32, 32))){
           node->signal_state = !node->signal_state;
         }
         //ImGui::PopStyleColor();
@@ -414,44 +481,52 @@ void DrawEditor(Editor *editor){
     }
     ImGui::EndGroup();
 
-    //node->size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
-    ImVec2 node_rect_max = node_rect_min + node->size;
-
     // Display node box
-    draw_list->ChannelsSetCurrent(0); // Background
     ImGui::SetCursorScreenPos(node_rect_min);
+    ImGui::PushID(index.combined);
     ImGui::InvisibleButton("node", node->size);
+    ImGui::PopID();
     
     if(ImGui::IsItemHovered()){
       node_hovered = index;
       if(ImGui::IsMouseClicked(1)) {
         open_context_menu = 1;
+      } else if (ImGui::IsMouseClicked(0) && editor->mode != EditorMode_SelectBox){
+        if(!ArrayContains(node_hovered, editor->selectedNodes)){
+          editor->selectedNodes.count = 0;
+          ArrayAdd(node_hovered, editor->selectedNodes);
+        }
       }
     }
 
     bool node_moving_active = ImGui::IsItemActive();
-    if(node_moving_active)
-      node_selected = index;
-    if(node_moving_active && ImGui::IsMouseDragging(0))
-      node->position = node->position + ImGui::GetIO().MouseDelta;
 
-    ImU32 node_bg_color = (node_hovered == index || node_selected == index) ? NODE_BACKGROUND_HOVER_COLOR : NODE_BACKGROUND_DEFAULT_COLOR;
-    draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 4.0f); 
+    if(node_moving_active && ImGui::IsMouseDragging(0)){
+      for(size_t i = 0; i < editor->selectedNodes.count; i++){
+        EditorNode *selectedNode = GetNode(editor->selectedNodes[i], editor);
+        selectedNode->position += ImGui::GetIO().MouseDelta;
+      }
+    }
+
+    ImColor nodeColor = NODE_BACKGROUND_DEFAULT_COLOR;
+    if(ArrayContains(index, editor->selectedNodes)){
+      nodeColor = NODE_BACKGROUND_SELECTED_COLOR;
+    }
+
+    draw_list->ChannelsSetCurrent(0); // Background
+    draw_list->AddRectFilled(node_rect_min, node_rect_max, nodeColor, 4.0f); 
     draw_list->AddRect(node_rect_min, node_rect_max, NODE_OUTLINE_COLOR, 4.0f);
-    ImGui::PopID();
   });
   draw_list->ChannelsMerge();
 
-
-
   //Draw and Update Node IO slots
   iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
-    ImGui::PushID(index.combined);
-
     ImVec2 node_rect_min = offset + node->position - ImVec2(12,12);
     ImGui::SetCursorScreenPos(node_rect_min);
     ImVec2 size = ImVec2(node->size.x + 32, node->size.x + 32);
+    ImGui::PushID(index.combined + editor->nodeBlocks.count * 1024);
     ImGui::InvisibleButton("##node", size);
+    ImGui::PopID();
 
     bool hovered_slot_is_input = false;
     int hovered_slot_index = -1;
@@ -480,11 +555,6 @@ void DrawEditor(Editor *editor){
           break;
         }
       }
-    }
-
-    static bool do_test = false;
-    if(ImGui::IsMouseClicked(0)){
-      do_test = true;
     }
 
     static const ImColor default_color = ImColor(150,150,150,150);
@@ -539,7 +609,6 @@ void DrawEditor(Editor *editor){
         }
       }
     }
-    ImGui::PopID();
   });
 
   //@Dragging 
@@ -563,40 +632,57 @@ void DrawEditor(Editor *editor){
     is_context_menu_open = true;
   }
 
+  switch(editor->mode){
+    case EditorMode_None:{
+      if(ImGui::IsMouseDragging(0)){
+        if(node_hovered != InvalidNodeIndex()) break;
+        editor->selectBoxOrigin = ImGui::GetMousePos();
+        editor->mode = EditorMode_SelectBox;
+      }
+    } break;
+
+    case EditorMode_SelectBox:{
+      if(ImGui::IsMouseDragging(0) == 0){
+        editor->selectedNodes.count = 0;
+        auto end = ImGui::GetMousePos();
+        Rectangle selectBoxBounds;
+        selectBoxBounds.minX = Min(editor->selectBoxOrigin.x, end.x);
+        selectBoxBounds.maxX = Max(editor->selectBoxOrigin.x, end.x);
+        selectBoxBounds.minY = Min(editor->selectBoxOrigin.y, end.y);
+        selectBoxBounds.maxY = Max(editor->selectBoxOrigin.y, end.y);
+        iterate_nodes(editor->nodeBlocks.data, editor->nodeBlocks.count, [&](EditorNode *node, NodeIndex index){
+          Rectangle nodeRect = {node->position.x, node->position.y, node->position.x + node->size.x, node->position.y + node->size.y};
+          if(Intersects(selectBoxBounds, nodeRect)){
+            ArrayAdd(index, editor->selectedNodes);
+          }
+        });
+        editor->mode = EditorMode_None;
+      }
+    } break;
+  }
+
+  if(editor->mode == EditorMode_SelectBox){
+    ImColor color = ImColor(100, 100, 100, 100);
+    draw_list->AddRectFilled(editor->selectBoxOrigin, ImGui::GetMousePos(), color);
+  }
+
   // Draw context menu
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
   if(ImGui::BeginPopup("context_menu")){
     ImVec2 scene_pos = ImGui::GetMousePosOnOpeningCurrentPopup() - offset;
     if(IsValid(node_hovered)){
-      EditorNode *node = GetNode(node_hovered, editor);
+
       if(ImGui::MenuItem("Delete")){
-
-        for(size_t i = 0; i < node->input_count; i++){
-          NodeConnection *connection = &node->inputConnections[i];
-          if(IsValid(connection->node_index) == false) continue;
-
-          EditorNode *inputSource = GetNode(connection->node_index, editor);
-          
-          bool wasConnectionRemoved = false;
-          for(size_t n = 0; n < inputSource->outputConnections.count; n++){
-            NodeConnection *ioConnection = &inputSource->outputConnections[n];
-            if((ioConnection->node_index == node_hovered) && ioConnection->io_index == i){
-              ArrayRemoveAtIndexUnordered(n, inputSource->outputConnections);
-              wasConnectionRemoved = true;              
-            }
-          }
-
-          assert(wasConnectionRemoved && "inputConnection did not match any outputConnection");
+        if(ArrayContains(node_hovered, editor->selectedNodes)){
+          for(size_t i = 0; i < editor->selectedNodes.count; i++)
+            DeleteNode(editor->selectedNodes[i], editor);
+          editor->selectedNodes.count = 0;
+        } else {
+          DeleteNode(node_hovered, editor);
         }
 
-        for(size_t i = 0; i < node->outputConnections.count; i++){
-          NodeConnection *connection = &node->outputConnections[i];
-          EditorNode *connectionDest = GetNode(connection->node_index, editor);
-          connectionDest->inputConnections[connection->io_index].node_index = InvalidNodeIndex();
-        }
-
-        DeleteNode(node_hovered, editor);
-        node_selected = InvalidNodeIndex();
+  
+  
       }
     }
     else {
