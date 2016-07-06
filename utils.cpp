@@ -38,14 +38,14 @@ void ArrayRemoveAtIndexUnordered(const size_t index, DynamicArray<T>& array){
 
 template<typename T>
 void ArrayRemoveValueUnordered(const T& t, DynamicArray<T>& array){
-  for(size_t i = 0; i < array->count; i++){
-    if(array->data[i] == t) {
-      array->data[i] = array->data[array->count - 1];
-      array->count -= 1;
+  for(size_t i = 0; i < array.count; i++){
+    if(array.data[i] == t) {
+      array.data[i] = array.data[array.count - 1];
+      array.count -= 1;
       return;
     }
-    assert(false);
   }
+  assert(false);
 }
 
 template <typename T>
