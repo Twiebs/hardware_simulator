@@ -5,82 +5,12 @@
 
 #pragma clang diagnostic ignored "-Wformat-security"
 
-template<typename T>
-struct DynamicArray {
-  size_t capacity;
-  size_t count;
-  T *data;
+#include "utils.cpp"
 
-  DynamicArray() {
-    capacity = 0;
-    count = 0;
-    data = 0;
-  }
 
-  inline T& operator[](const size_t i){
-    assert(i < count);
-    return data[i];
-  }
-};
 
-template<typename T>
-void ArrayAdd(const T& t, DynamicArray<T>& array){
-  if(array.count + 1 > array.capacity){
-    array.capacity = array.capacity + 10;
-    if(array.data != 0) array.data = (T*)realloc(array.data, sizeof(T) * array.capacity);
-    else array.data = (T *)malloc(sizeof(T) * array.capacity);
-  }
 
-  array.data[array.count] = t;
-  array.count += 1;
-}
-
-template<typename T>
-void ArrayRemoveAtIndexUnordered(const size_t index, DynamicArray<T>& array){
-  assert(index < array.count);
-  array.data[index] = array.data[array.count-1];
-  array.count -= 1;
-}
-
-template<typename T>
-void ArrayRemoveValueUnordered(const T& t, DynamicArray<T>& array){
-  for(size_t i = 0; i < array->count; i++){
-    if(array->data[i] == t) {
-      array->data[i] = array->data[array->count - 1];
-      array->count -= 1;
-      return;
-    }
-    assert(false);
-  }
-}
-
-template <typename T>
-int ArrayContains(const T& value, DynamicArray<T>& array){
-  for(size_t i = 0; i < array.count; i++){
-    if(array.data[i] == value){
-      return 1;
-    }
-  }
-  return 0;
-}
-
-template<typename T>
-void ArrayDestroy(DynamicArray<T>& array){
-  if(array.data != 0) free(array.data);
-  array.count = 0;
-  array.capacity = 0;
-}
-
-enum LogicNodeType {
-  LogicNodeType_AND,
-  LogicNodeType_OR,
-  LogicNodeType_XOR,
-  LogicNodeType_INPUT,
-  LogicNodeType_OUTPUT,
-  LogicNodeType_COUNT,
-};
-
-static const char *LogicNodeName[] = {
+static const char *NodeName[] = {
   "AND",
   "OR",
   "XOR",
@@ -88,14 +18,26 @@ static const char *LogicNodeName[] = {
   "OUTPUT",
 };
 
+enum NodeType {
+  NodeType_AND,
+  NodeType_OR,
+  NodeType_XOR,
+  NodeType_INPUT,
+  NodeType_OUTPUT,
+  NodeType_COUNT,
+};
+
+enum NodeState : uint8_t {
+  NodeState_LOW,
+  NodeState_HIGH,
+  NodeState_NONE,
+};
+
+struct EditorNode;
+
 struct NodeIndex {
-  union { 
-    struct {
-      uint16_t block_index;
-      uint16_t node_index;
-    };
-    uint32_t combined;
-  };
+  //uint32_t node_index;
+  EditorNode *node_ptr;
 };
 
 struct NodeConnection {
@@ -103,6 +45,21 @@ struct NodeConnection {
   uint32_t io_index;
 };
 
+struct EditorNode {
+  uint32_t type;
+  size_t input_count;
+  size_t output_count;
+  ImVec2 position;
+  ImVec2 size;
+
+  NodeState *input_state;                           //NodeState[input_count]
+  NodeConnection *inputConnections;                 //NodeConnection[input_count]
+  DynamicArray<NodeConnection> *output_connections; //DynamicArray<NodeConnection>[output_count]
+
+  NodeState signal_state;
+};
+
+#if 0
 struct ICNodeConnection {
   uint32_t node_offset;
   uint32_t io_index;
@@ -120,39 +77,7 @@ struct ICDefinition {
   uint32_t input_count;
   uint32_t output_count;
 };
-
-enum NodeState : uint8_t {
-  NodeState_LOW,
-  NodeState_HIGH,
-  NodeState_NONE,
-};
-
-
-//NOTE(Torin) This EditorNode is used to represent nodes only within the editor
-//Its implementation is simple and naive inorder to simplify the editor code as much as possible
-//and allow users to modify the data it represents as easily as possible.  When the simulator is run
-//editor nodes are 'compiled' into SimulatorNodes which are much more efficent but are immuatable
-
-//TODO(Torin) Nodes should be seperated into two different types
-//BasicNodes and CompoundNodes.  Basic nodes have static arrays because
-//there max inputs are 2 and their max outputs are 1.  This is a more
-//realisitic yet counterintuitive representation of the data because we
-//can then crush all of the compound nodes into chains of BasicNodes during
-//a preprocess step before the Simulation is run
-
-struct EditorNode {
-  uint32_t type;
-  size_t input_count;
-  size_t output_count;
-  ImVec2 position;
-  ImVec2 size;
-
-  NodeState *input_state;                           //NodeState[input_count]
-  NodeConnection *inputConnections;                 //NodeConnection[input_count]
-  DynamicArray<NodeConnection> *output_connections; //DynamicArray<NodeConnection>[output_count]
-
-  NodeState signal_state;
-};
+#endif
 
 EditorNode *CreateNode(uint32_t input_count, uint32_t output_count) {
   size_t required_memory = sizeof(EditorNode);
@@ -168,7 +93,7 @@ EditorNode *CreateNode(uint32_t input_count, uint32_t output_count) {
   node->input_count = input_count;
   node->output_count = output_count;
 
-  uint8_t *current = (uint8_t *)(node + 1);
+  uintptr_t current = (uintptr_t)(node + 1);
   current = (current + 0x7) & ~0x7;
   node->input_state = (NodeState *)current;
   current += sizeof(NodeState) * input_count;
@@ -176,18 +101,23 @@ EditorNode *CreateNode(uint32_t input_count, uint32_t output_count) {
   node->inputConnections = (NodeConnection *)current;
   current += sizeof(NodeConnection) * input_count;
   current = (current + 0x3) & ~0x3;
-  node->output_connections = current;
+  node->output_connections = (DynamicArray<NodeConnection> *)current;
+
+  //TODO(Torin) Proper node sizing
+  uint32_t largestIOCount = Max(input_count, output_count);
+  node->size = ImVec2(64, 64);
 
   return node;
 }
 
-
+#if 0
 struct NodeBlock {
   static const size_t NODE_COUNT = 256;
   size_t currentOccupiedCount;
   uint8_t isOccupied[NODE_COUNT];
   EditorNode nodes[NODE_COUNT];
 };
+#endif
 
 enum EditorMode {
   EditorMode_None,
@@ -195,9 +125,11 @@ enum EditorMode {
 };
 
 struct Editor {
-  DynamicArray<NodeBlock *> nodeBlocks;
+  DynamicArray<EditorNode *> nodes;
   DynamicArray<NodeIndex> selectedNodes;
-  DynamicArray<ICDefinition *> icdefs;
+ // DynamicArray<ICDefinition *> icdefs;
+
+  //DynamicArray<NodeBlock *> nodeBlocks;
   
   EditorMode mode;
   union {
@@ -205,41 +137,32 @@ struct Editor {
   };
 };
 
-struct Rectangle {
-  float minX, minY;
-  float maxX, maxY;
-};
-
-int Intersects(const Rectangle& a, const Rectangle& b){
-  if(a.maxX < b.minX || a.minX > b.maxX) return 0;
-  if(a.maxY < b.minY || a.minY > b.maxY) return 0;
-  return 1;
-}
-
-int Max(int a, int b){
-  int result = a > b ? a : b;
-  return result;
-}
-
-int Min(int a, int b){
-  int result = a < b ? a : b;
-  return result;
-}
-
 static inline
 bool IsValid(NodeIndex index){
-  bool result = (index.node_index != UINT16_MAX && index.block_index != UINT16_MAX); 
+  bool result = index.node_ptr != nullptr;
   return result;
 }
 
 static inline
 NodeIndex InvalidNodeIndex(){
   NodeIndex result;
-  result.block_index = UINT16_MAX;
-  result.node_index = UINT16_MAX;
+  result.node_ptr = nullptr;
   return result;
 }
 
+static inline 
+bool operator==(const NodeIndex& a, const NodeIndex& b){
+  if(a.node_ptr != b.node_ptr) return 0;
+  return 1;
+}
+
+static inline 
+bool operator!=(const NodeIndex& a, const NodeIndex& b){
+  if(a.node_ptr == b.node_ptr) return 0;
+  return 1;
+}
+
+#if 0
 static inline 
 bool operator==(const NodeIndex& a, const NodeIndex& b){
   if(a.block_index != b.block_index) return 0;
@@ -252,7 +175,9 @@ bool operator!=(const NodeIndex& a, const NodeIndex& b){
   if(a.block_index == b.block_index && a.node_index == b.node_index) return 0;
   return 1;
 }
+#endif
 
+#if 0
 static inline
 EditorNode *GetNextAvailableNode(Editor *editor){
   for(size_t blockIndex = 0; blockIndex < editor->nodeBlocks.count; blockIndex++){
@@ -273,49 +198,16 @@ EditorNode *GetNextAvailableNode(Editor *editor){
   ArrayAdd(block, editor->nodeBlocks);
   return GetNextAvailableNode(editor);
 }
-
-EditorNode* CreateNode(uint32_t type, Editor *editor){
-  EditorNode *node = GetNextAvailableNode(editor);
-  node->inputConnections[0].node_index = InvalidNodeIndex();
-  node->inputConnections[1].node_index = InvalidNodeIndex();
-  node->type = type;
-  node->outputConnections = (DynamicArray<NodeConnection> *)malloc(sizeof(DynamicArray<NodeConnection))
-
-  switch(node->type){
-    case LogicNodeType_INPUT:{
-      node->input_count = 0;
-      node->output_count = 1;
-    } break;
-
-    case LogicNodeType_OUTPUT: {
-      node->input_count = 1;
-      node->output_count = 0;
-    }break;
-
-    default: {
-      node->input_count = 2;
-      node->output_count = 1;
-    } break;
-  }
-
-  node->size = ImVec2(64, 64);
-  return node;
-}
+#endif
 
 static inline
 EditorNode *GetNode(NodeIndex index, Editor *editor){
-  assert(index.block_index < editor->nodeBlocks.count);
-  NodeBlock *block = editor->nodeBlocks[index.block_index];
-  assert(index.node_index < NodeBlock::NODE_COUNT);
-  EditorNode *result = &block->nodes[index.node_index];
-  return result;
+  return index.node_ptr;
 }
 
 static inline
 void DeleteNode(NodeIndex index, Editor *editor){
-  assert(index.block_index < editor->nodeBlocks.count);
-  assert(index.node_index < NodeBlock::NODE_COUNT);
-  EditorNode *node = GetNode(index, editor);
+  EditorNode *node = index.node_ptr;
 
   for(size_t i = 0; i < node->input_count; i++){
     NodeConnection *connection = &node->inputConnections[i];
@@ -323,11 +215,11 @@ void DeleteNode(NodeIndex index, Editor *editor){
     EditorNode *inputSource = GetNode(connection->node_index, editor);
     bool wasConnectionRemoved = false;
 
-    DynamicArray<NodeConnection> &sourceConnections = inputSource->outputConnections[connection->io_index];
-    for(size_t n = 0; n < sourceConnections.count; n++){
-      const NodeConnection *sourceConnection = &sourceConnections[n];
+    DynamicArray<NodeConnection> *sourceConnections = inputSource->output_connections[connection->io_index];
+    for(size_t n = 0; n < sourceConnections->count; n++){
+      const NodeConnection *sourceConnection = &((*sourceConnections)[n]);
       if((sourceConnection->node_index == index) && sourceConnection->io_index == i){
-        ArrayRemoveAtIndexUnordered(n, sourceConnections);
+        ArrayRemoveAtIndexUnordered(n, *sourceConnections);
         wasConnectionRemoved = true;              
       }
     }
