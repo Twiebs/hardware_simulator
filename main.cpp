@@ -45,23 +45,30 @@ struct NodeConnection {
   uint32_t io_index;
 };
 
+struct Node {
+  uint32_t type;
+  size_t input_count;
+  size_t output_count;
+  NodeState *input_state;                           //NodeState[input_count]
+  NodeConnection *inputConnections;     
+};
+
 struct EditorNode {
   uint32_t type;
   size_t input_count;
   size_t output_count;
-  ImVec2 position;
-  ImVec2 size;
-
   NodeState *input_state;                           //NodeState[input_count]
+  
   NodeConnection *inputConnections;                 //NodeConnection[input_count]
   DynamicArray<NodeConnection> *output_connections; //DynamicArray<NodeConnection>[output_count]
-
+ 
+  ImVec2 position;
+  ImVec2 size;
   NodeState signal_state;
 };
 
-#if 0
 struct ICNodeConnection {
-  uint32_t node_offset;
+  uint32_t node_index;
   uint32_t io_index;
 };
 
@@ -69,25 +76,18 @@ struct ICNode {
   uint32_t type;
   uint32_t input_count;
   uint32_t output_count;
-  //uint32_t connection_count_per_output[output_count];
-  //uint32_t output_connections[sum(connection_count_per_output)]
+
+  NodeState *input_state;
+  uint32_t *connection_count_per_output;
+  ICNodeConnection *output_connections;
 };
 
 struct ICDefinition {
   uint32_t input_count;
   uint32_t output_count;
+  uint32_t node_count;
+  ICNode *nodes; 
 };
-#endif
-
-
-#if 0
-struct NodeBlock {
-  static const size_t NODE_COUNT = 256;
-  size_t currentOccupiedCount;
-  uint8_t isOccupied[NODE_COUNT];
-  EditorNode nodes[NODE_COUNT];
-};
-#endif
 
 enum EditorMode {
   EditorMode_None,
@@ -95,19 +95,22 @@ enum EditorMode {
 };
 
 struct Editor {
-  
   DynamicArray<EditorNode *> nodes;
-
   DynamicArray<NodeIndex> selectedNodes;
- // DynamicArray<ICDefinition *> icdefs;
-
-  //DynamicArray<NodeBlock *> nodeBlocks;
+  DynamicArray<ICDefinition *> icdefs;
   
   EditorMode mode;
   union {
     ImVec2 selectBoxOrigin;
   };
 };
+
+struct MemoryBlock {
+  size_t size;
+  size_t used;
+  uintptr_t memory;
+};
+
 
 EditorNode *AllocateNode(uint32_t input_count, uint32_t output_count) {
   size_t required_memory = sizeof(EditorNode);
@@ -149,10 +152,19 @@ EditorNode *CreateNode(uint32_t node_type, Editor *editor){
     case NodeType_OUTPUT:{
       input_count = 1;
     }break;
+
     default:{
-      input_count = 2;
-      output_count = 1;
+      if(node_type > NodeType_COUNT){
+        uint32_t ic_index = node_type - (NodeType_COUNT + 1);
+        ICDefinition *ic = editor->icdefs[ic_index];
+        input_count = ic->input_count;
+        output_count = ic->output_count;
+      } else {
+        input_count = 2;
+        output_count = 1;
+      }
     }break;
+
   }
 
   auto node = AllocateNode(input_count, output_count);
@@ -305,8 +317,92 @@ void TransmitOutputAndSimulateConnectedNodes(EditorNode *node, uint8_t outputSta
 }
 
 static inline
+uint64_t GetNodeOutputState(const uint32_t type, const NodeState *inputState, const size_t inputCount, uint8_t *outputState){
+  switch(type){
+    
+    case NodeType_OUTPUT: {
+      *outputState = (inputState[0] == NodeState_NONE) ? NodeState_LOW : inputState[0];
+    }break;
+
+    case NodeType_AND:{
+      if(inputState[0] == NodeState_NONE) return 0;
+      if(inputState[1] == NodeState_NONE) return 0;
+      *outputState = inputState[0] & inputState[1];
+    }break;
+
+    case NodeType_OR:{
+      if(inputState[0] == NodeState_NONE) return 0;
+      if(inputState[1] == NodeState_NONE) return 0;
+      *outputState = inputState[0] | inputState[1];
+    }break;
+
+    case NodeType_XOR:{
+      if(inputState[0] == NodeState_NONE) return 0;
+      if(inputState[1] == NodeState_NONE) return 0;
+      *outputState = inputState[0] ^ inputState[1];
+    }break;
+
+    default:{
+      assert(false);
+    };
+  }
+
+  return 1;
+}
+
+static inline
+void SimulateICNode(ICNode *node, ICDefinition *icdef){
+  switch(node->type){
+    default: {
+      if(node->type > NodeType_COUNT) assert(false);
+
+      uint8_t outputState = 0;
+      if(GetNodeOutputState(node->type, node->input_state, node->input_count, &outputState)){
+        assert(node->output_count == 1);
+
+        for(size_t n = 0; n < node->connection_count_per_output[0]; n++){
+          ICNodeConnection *connection = &node->output_connections[n]; 
+          ICNode *connectedNode = &icdef->nodes[connection->node_index];
+          connectedNode->input_state[connection->io_index] = (NodeState)outputState;
+          SimulateICNode(connectedNode, icdef);
+        } 
+
+      }
+    } break;
+  }
+}
+
+static inline
+void SimulateIC(ICDefinition *icdef, NodeState *inputs){
+  //TODO(Torin) Should this be done here?
+  for(size_t i = 0; i < icdef->input_count; i++)
+    if(inputs[i] == NodeState_NONE) return;
+
+  //TODO(Torin) For now input_states are stored within the ICNode itself
+  //which is a bad idea for but for now set the state to NONE
+  for(size_t i = 0; i < icdef->node_count; i++){
+    ICNode *node = &icdef->nodes[i];
+    for(size_t j = 0; j < node->input_count; j++){
+      node->input_state[j] = NodeState_NONE;
+    }
+  }
+
+  for(size_t i = 0; i < icdef->input_count; i++){
+    //NOTE(Torin) The first (input_count) nodes are inputs 
+    ICNode *node = &icdef->nodes[i];
+    SimulateICNode(node, icdef);
+  }  
+
+
+  for(size_t i = 0; i < icdef->output_count; i++){
+    //TODO(Torin)Send out the outputstate 
+  }
+}
+
+static inline
 void SimulateNode(EditorNode *node, Editor *editor){
   switch(node->type){
+    
     case NodeType_INPUT: {
       it(outputIndex, node->output_count){
         auto outputConnections = node->output_connections[outputIndex];
@@ -318,40 +414,27 @@ void SimulateNode(EditorNode *node, Editor *editor){
       }
     }break;
 
-    case NodeType_OUTPUT: {
-      if(node->input_state[0] == NodeState_NONE){
-        node->signal_state = NodeState_LOW;
-      } else {
-        node->signal_state = node->input_state[0];
-      }
-    }break;
-
-    case NodeType_AND:{
-      if(node->input_state[0] == NodeState_NONE) return;
-      if(node->input_state[0] == NodeState_NONE) return;
-      uint8_t output_signal = node->input_state[0] && node->input_state[1];
-      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
-    }break;
-
-    case NodeType_OR:{
-      if(node->input_state[0] == NodeState_NONE) return;
-      if(node->input_state[1] == NodeState_NONE) return;
-      uint8_t output_signal = node->input_state[0] || node->input_state[1];
-      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
-    }break;
-
-    case NodeType_XOR:{
-      if(node->input_state[0] == NodeState_NONE) return;
-      if(node->input_state[1] == NodeState_NONE) return;
-      uint8_t output_signal = node->input_state[0] || node->input_state[1];
-      output_signal = output_signal && !(node->input_state[0] && node->input_state[1]);
-      TransmitOutputAndSimulateConnectedNodes(node, output_signal, editor);
-    }break;
 
     default:{
 
+      if(node->type > NodeType_COUNT){
+        for(size_t i = 0; i < node->input_count; i++)
+          if(node->input_state[i] == NodeState_NONE) return;
 
+        size_t ic_index = node->type - (NodeType_COUNT + 1);
+        auto ic = editor->icdefs[ic_index];
+        assert(node->input_count == ic->input_count);
+        SimulateIC(ic, node->input_state);
+
+      } else {
+        uint8_t output_state;
+        if(GetNodeOutputState(node->type, node->input_state, node->input_count, &output_state)){
+          TransmitOutputAndSimulateConnectedNodes(node, output_state, editor);
+        }
+      }
     }break;
+
+
   }
 }
 
@@ -453,6 +536,7 @@ void DrawNodeDebugInfo(EditorNode *node){
   ImGui::End();
 }
 
+
 void DrawEditor(Editor *editor){
   static const ImU32 GRID_COLOR = ImColor(200,200,200,40);
   static const float GRID_SIZE = 16.0f;
@@ -493,7 +577,7 @@ void DrawEditor(Editor *editor){
 
   ImGui::BeginGroup();
 
-  // Create our child canvas
+  // 	 our child canvas
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1,1));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
   ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImColor(60,60,70,200));
@@ -778,14 +862,13 @@ void DrawEditor(Editor *editor){
         }
       }
 
+      
       if(ImGui::MenuItem("Create IC")){
-
-        #if 0
         DynamicArray<EditorNode *> inputs;
         DynamicArray<EditorNode *> outputs;
         DynamicArray<EditorNode *> logic;
 
-        for(size_t i = 0; i < editor->selectedNodes.count; i++){
+        it(i, editor->selectedNodes.count){
           EditorNode *node = GetNode(editor->selectedNodes[i], editor);
           if(node->type == NodeType_INPUT) {
             ArrayAdd(node, inputs);
@@ -800,37 +883,119 @@ void DrawEditor(Editor *editor){
         for(size_t i = 0; i < editor->selectedNodes.count; i++){
           EditorNode *node = GetNode(editor->selectedNodes[i], editor);
           required_memory += sizeof(ICNode);
+          required_memory += node->input_count * sizeof(NodeState);
+          required_memory += node->output_count * sizeof(uint32_t);
           required_memory += node->output_count * sizeof(ICNodeConnection);
         }
 
+        ICDefinition *icdef = (ICDefinition *)malloc(required_memory);
+        ArrayAdd(icdef, editor->icdefs);
+        icdef->input_count = inputs.count;
+        icdef->output_count = outputs.count;
+        icdef->node_count = editor->selectedNodes.count;
+
+        MStack mstack = {};
+        mstack.base = (uintptr_t)(icdef + 1);
+        mstack.size = required_memory - sizeof(ICDefinition);
+        icdef->nodes = MStackPushArray(ICNode, icdef->node_count, &mstack); 
+        
+        auto InitICNode = [](ICNode *ic_node, EditorNode *ed_node, MStack *mstack){
+          ic_node->type = ed_node->type;
+          ic_node->input_count = ed_node->input_count; 
+          ic_node->output_count = ed_node->output_count;
+          ic_node->input_state = MStackPushArray(NodeState, ic_node->input_count, mstack); 
+          ic_node->connection_count_per_output = MStackPushArray(uint32_t, ic_node->output_count, mstack);
+
+          size_t totalConnectionCount = 0;
+          for(size_t n = 0; n < ic_node->output_count; n++){
+            DynamicArray<NodeConnection>& connections = ed_node->output_connections[n];
+            ic_node->connection_count_per_output[n] = connections.count;
+            totalConnectionCount += connections.count;
+          }
+
+          ic_node->output_connections = MStackPushArray(ICNodeConnection, totalConnectionCount, mstack);
+        };
+        
+        //TODO(Torin) @UNSAFE This stack allocation could potentialy be enormous
+        EditorNode *icToEdMap[editor->selectedNodes.count];
+        size_t currentICNodeIndex = 0;
+        for(size_t i = 0; i < inputs.count; i++){
+          EditorNode *ed_node = inputs[i];
+          ICNode *ic_node = &icdef->nodes[currentICNodeIndex];
+          InitICNode(ic_node, ed_node, &mstack);
+          icToEdMap[currentICNodeIndex] = ed_node;
+          currentICNodeIndex++;
+        }
+
+        for(size_t i = 0; i < outputs.count; i++){
+          EditorNode *ed_node = outputs[i];
+          ICNode *ic_node = &icdef->nodes[currentICNodeIndex];
+          InitICNode(ic_node, ed_node, &mstack);
+          icToEdMap[currentICNodeIndex] = ed_node;
+          currentICNodeIndex++;
+        }
+
+        //TODO(Torin) Sort by distance to inputs?
+        for(size_t i = 0; i < logic.count; i++){
+          EditorNode *ed_node = logic[i];
+          ICNode *ic_node = &icdef->nodes[currentICNodeIndex];
+          InitICNode(ic_node, ed_node, &mstack);
+          icToEdMap[currentICNodeIndex] = ed_node;
+          currentICNodeIndex++;
+        }
+
+        for(size_t i = 0; i < icdef->node_count; i++){
+          ICNode *icnode = &icdef->nodes[i];
+          EditorNode *ednode = icToEdMap[i];
+          size_t currentConnectionIndex = 0;
+          for(size_t n = 0; n < icnode->output_count; n++){
+            DynamicArray<NodeConnection>& connections = ednode->output_connections[n]; 
+            for(size_t j = 0; j < connections.count; j++){
+              NodeConnection *edConnection = &connections[j];
+              ICNodeConnection icConnection = {};
+              icConnection.io_index = edConnection->io_index;
+
+              EditorNode *connectedNodePtr = edConnection->node_index.node_ptr;
+              size_t connectedNodeIndex = 0;
+              if(!LinearSearch<EditorNode *>(connectedNodePtr, icToEdMap, icdef->node_count, &connectedNodeIndex)){
+                assert(false);
+              }
+              icConnection.node_index = connectedNodeIndex;
+              icnode->output_connections[currentConnectionIndex] = icConnection;
+            }
+          }
+        }
 
         for(size_t i = 0; i < editor->selectedNodes.count; i++){
           DeleteNode(editor->selectedNodes[i], editor);
         }
 
-        uint32_t node_type = LogicNodeType_COUNT + 1 + editor->icdefs.count;
+        uint32_t node_type = NodeType_COUNT + 1 + (editor->icdefs.count - 1);
         auto node = CreateNode(node_type, editor);
-        node->position = offset + ImGui::GetMousePos();
-        node->input_count = inputs.count;
-        node->output_count = outputs.count;
-
-
-        
 
         ArrayDestroy(inputs);
         ArrayDestroy(outputs);
         ArrayDestroy(logic);
-        #endif
       }
-
     }
     else {
+
       for(size_t i = 0; i < NodeType_COUNT; i++){
         if(ImGui::MenuItem(NodeName[i])) {
           auto node = CreateNode((NodeType)i, editor);
           node->position = canvasMouseCoords;
         }
       }
+
+      ImGui::Separator();
+
+      it(i, editor->icdefs.count){
+        if(ImGui::MenuItem("IC XXX")){
+          auto node = CreateNode(i + NodeType_COUNT + 1, editor);
+        }
+      }
+
+
     }
     ImGui::EndPopup();
   } else {

@@ -1,3 +1,28 @@
+struct MStack {
+  size_t size;
+  size_t used;
+  uintptr_t base;
+};
+
+uintptr_t MStackPush(size_t size, MStack *mstack){
+  assert(mstack->used + size <= mstack->size);
+  uintptr_t result = mstack->base + mstack->used;
+  mstack->used += size;
+  return result;
+}
+
+template<typename T>
+bool LinearSearch(T value, T *data, size_t count, size_t *result){
+  for(size_t i = 0; i < count; i++){
+    if(data[i] == value) {
+      *result = i;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+#define MStackPushArray(Type, Count, MStackPtr) (Type *)MStackPush(sizeof(Type) * Count, MStackPtr)
 
 template<typename T>
 struct DynamicArray {
