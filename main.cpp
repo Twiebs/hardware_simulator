@@ -95,6 +95,7 @@ enum EditorMode {
 };
 
 struct Editor {
+  DynamicArray<EditorNode *> inputs;
   DynamicArray<EditorNode *> nodes;
   DynamicArray<NodeIndex> selectedNodes;
   DynamicArray<ICDefinition *> icdefs;
@@ -170,6 +171,9 @@ EditorNode *CreateNode(uint32_t node_type, Editor *editor){
   auto node = AllocateNode(input_count, output_count);
   node->type = node_type;
   ArrayAdd(node, editor->nodes);
+  if(node->type == NodeType_INPUT){
+    ArrayAdd(node, editor->inputs);
+  }
   return node;
 }
 
@@ -277,6 +281,10 @@ void DeleteNode(NodeIndex index, Editor *editor){
   }
 
   ArrayRemoveValueUnordered(node, editor->nodes);
+  if(node->type == NodeType_INPUT){
+    ArrayRemoveValueUnordered(node, editor->inputs);
+  }
+
   free(node);
 
 
@@ -301,25 +309,31 @@ void RemoveNodeOutputConnections(EditorNode *node, Editor *editor){
 static inline void SimulateNode(EditorNode *node, Editor *editor);
 
 static inline
-void TransmitOutputAndSimulateConnectedNodes(EditorNode *node, uint8_t outputState, Editor *editor){
+void TransmitOutputAndSimulateConnectedNodes(EditorNode *node, uint32_t output_index, uint8_t outputState, Editor *editor){
   assert(outputState != NodeState_NONE);
+  assert(output_index < node->output_count);
   node->signal_state = (NodeState)outputState;
 
-  it(outputIndex, node->output_count){
-    DynamicArray<NodeConnection>& outputConnections = node->output_connections[outputIndex];
-    it(i, outputConnections.count){
-      NodeConnection *connection = &outputConnections[i];
-      auto connectedNode = GetNode(connection->node_index, editor);
-      connectedNode->input_state[connection->io_index] = (NodeState)outputState;
-      SimulateNode(connectedNode, editor);
-    }
+  DynamicArray<NodeConnection>& outputConnections = node->output_connections[output_index];
+  it(i, outputConnections.count){
+    NodeConnection *connection = &outputConnections[i];
+    auto connectedNode = GetNode(connection->node_index, editor);
+    connectedNode->input_state[connection->io_index] = (NodeState)outputState;
+    SimulateNode(connectedNode, editor);
   }
 }
 
 static inline
 uint64_t GetNodeOutputState(const uint32_t type, const NodeState *inputState, const size_t inputCount, uint8_t *outputState){
   switch(type){
+
+    //TODO(Torin) inputs should not be duplicated
+    //simulating a input node is redundant see SimulateIC
+    case NodeType_INPUT:{
+      *outputState = inputState[0];
+    };
     
+    //TODO(Torin) Same thing ^^^^^^^^^^
     case NodeType_OUTPUT: {
       *outputState = (inputState[0] == NodeState_NONE) ? NodeState_LOW : inputState[0];
     }break;
@@ -350,9 +364,30 @@ uint64_t GetNodeOutputState(const uint32_t type, const NodeState *inputState, co
   return 1;
 }
 
+static inline void SimulateICNode(ICNode *node, ICDefinition *icdef);
+
+
+static inline
+void TransmitICNodeOutputAndSimulateConnectedNodes(ICNode *node, size_t outputSlot, uint8_t signal, ICDefinition *icdef){
+  for(size_t n = 0; n < node->connection_count_per_output[outputSlot]; n++){
+    ICNodeConnection *connection = &node->output_connections[n]; 
+    ICNode *connectedNode = &icdef->nodes[connection->node_index];
+    connectedNode->input_state[connection->io_index] = (NodeState)signal;
+    SimulateICNode(connectedNode, icdef);
+  }
+}
+
 static inline
 void SimulateICNode(ICNode *node, ICDefinition *icdef){
   switch(node->type){
+
+    case NodeType_OUTPUT:{
+      //NOTE(Torin) Intentionaly does nothing for now
+      //Output is already stored in this nodes input_state
+      //and is handled after the IC has been fully simulated
+    }break;
+
+
     default: {
       if(node->type > NodeType_COUNT) assert(false);
 
@@ -365,37 +400,28 @@ void SimulateICNode(ICNode *node, ICDefinition *icdef){
           ICNode *connectedNode = &icdef->nodes[connection->node_index];
           connectedNode->input_state[connection->io_index] = (NodeState)outputState;
           SimulateICNode(connectedNode, icdef);
-        } 
-
+        }
       }
     } break;
   }
 }
 
 static inline
-void SimulateIC(ICDefinition *icdef, NodeState *inputs){
-  //TODO(Torin) Should this be done here?
+void SimulateIC(ICDefinition *icdef, NodeState *inputs, NodeState *outputs){
   for(size_t i = 0; i < icdef->input_count; i++)
     if(inputs[i] == NodeState_NONE) return;
 
-  //TODO(Torin) For now input_states are stored within the ICNode itself
-  //which is a bad idea for but for now set the state to NONE
-  for(size_t i = 0; i < icdef->node_count; i++){
+  //TODO(Torin) This should just emit outputs! 
+  //NOTE(Torin) The first (input_count) nodes are inputs 
+  for(size_t i = 0; i < icdef->input_count; i++){
     ICNode *node = &icdef->nodes[i];
-    for(size_t j = 0; j < node->input_count; j++){
-      node->input_state[j] = NodeState_NONE;
-    }
+    assert(node->type == NodeType_INPUT);
+    TransmitICNodeOutputAndSimulateConnectedNodes(node, 0, inputs[i], icdef);
   }
 
-  for(size_t i = 0; i < icdef->input_count; i++){
-    //NOTE(Torin) The first (input_count) nodes are inputs 
-    ICNode *node = &icdef->nodes[i];
-    SimulateICNode(node, icdef);
-  }  
-
-
   for(size_t i = 0; i < icdef->output_count; i++){
-    //TODO(Torin)Send out the outputstate 
+    const ICNode *ic_outputs = icdef->nodes + icdef->input_count;
+    outputs[i] = ic_outputs[i].input_state[0];
   }
 }
 
@@ -404,14 +430,11 @@ void SimulateNode(EditorNode *node, Editor *editor){
   switch(node->type){
     
     case NodeType_INPUT: {
-      it(outputIndex, node->output_count){
-        auto outputConnections = node->output_connections[outputIndex];
-        it(i, outputConnections.count){
-          auto connection = &outputConnections[i];
-          auto connectedNode = GetNode(connection->node_index, editor);
-          connectedNode->input_state[connection->io_index] = node->signal_state;
-        }
-      }
+      TransmitOutputAndSimulateConnectedNodes(node, 0, node->signal_state, editor); 
+    }break;
+
+    case NodeType_OUTPUT:{
+      node->signal_state = (node->input_state[0] == NodeState_NONE) ? NodeState_LOW : node->input_state[0];
     }break;
 
 
@@ -423,13 +446,20 @@ void SimulateNode(EditorNode *node, Editor *editor){
 
         size_t ic_index = node->type - (NodeType_COUNT + 1);
         auto ic = editor->icdefs[ic_index];
+
         assert(node->input_count == ic->input_count);
-        SimulateIC(ic, node->input_state);
+        assert(node->output_count > 0);
+        NodeState outputs[node->output_count];
+        SimulateIC(ic, node->input_state, outputs);
+        for(size_t i = 0; i < node->output_count; i++){
+          TransmitOutputAndSimulateConnectedNodes(node, i, outputs[i], editor);
+        }
+
 
       } else {
         uint8_t output_state;
         if(GetNodeOutputState(node->type, node->input_state, node->input_count, &output_state)){
-          TransmitOutputAndSimulateConnectedNodes(node, output_state, editor);
+          TransmitOutputAndSimulateConnectedNodes(node, 0, output_state, editor);
         }
       }
     }break;
@@ -502,11 +532,21 @@ void SimulationStep(Editor *editor){
     memset(node->input_state, NodeState_NONE, node->input_count * sizeof(NodeState));
   });
 
-  //TODO(Torin) With this model nodes are being simulated more than once
-  //Seperate out the input sources and only simulate them!
-  iterate_nodes(editor, [editor](EditorNode *node){
+  for(size_t ic_index = 0; ic_index < editor->icdefs.count; ic_index++){
+    ICDefinition *icdef = editor->icdefs[ic_index];
+    for(size_t i = 0; i < icdef->node_count; i++){
+      ICNode *node = &icdef->nodes[i];
+      for(size_t n = 0; n < node->input_count; n++){
+        node->input_state[n] = NodeState_NONE;
+      }
+    }
+  }
+  
+
+  for(size_t i = 0; i < editor->inputs.count; i++){
+    EditorNode *node = editor->inputs[i];
     SimulateNode(node, editor);
-  });
+  }
 }
 
 static inline
@@ -888,7 +928,7 @@ void DrawEditor(Editor *editor){
           required_memory += node->output_count * sizeof(ICNodeConnection);
         }
 
-        ICDefinition *icdef = (ICDefinition *)malloc(required_memory);
+        ICDefinition *icdef = (ICDefinition *)calloc(required_memory, 1);
         ArrayAdd(icdef, editor->icdefs);
         icdef->input_count = inputs.count;
         icdef->output_count = outputs.count;
@@ -903,17 +943,21 @@ void DrawEditor(Editor *editor){
           ic_node->type = ed_node->type;
           ic_node->input_count = ed_node->input_count; 
           ic_node->output_count = ed_node->output_count;
-          ic_node->input_state = MStackPushArray(NodeState, ic_node->input_count, mstack); 
-          ic_node->connection_count_per_output = MStackPushArray(uint32_t, ic_node->output_count, mstack);
+          
+          if(ic_node->input_count > 0) {
+            ic_node->input_state = MStackPushArray(NodeState, ic_node->input_count, mstack);
+          }          
 
-          size_t totalConnectionCount = 0;
-          for(size_t n = 0; n < ic_node->output_count; n++){
-            DynamicArray<NodeConnection>& connections = ed_node->output_connections[n];
-            ic_node->connection_count_per_output[n] = connections.count;
-            totalConnectionCount += connections.count;
+          if(ic_node->output_count > 0){
+            ic_node->connection_count_per_output = MStackPushArray(uint32_t, ic_node->output_count, mstack);
+            size_t totalConnectionCount = 0;
+            for(size_t n = 0; n < ic_node->output_count; n++){
+              DynamicArray<NodeConnection>& connections = ed_node->output_connections[n];
+              ic_node->connection_count_per_output[n] = connections.count;
+              totalConnectionCount += connections.count;
+            }
+            ic_node->output_connections = MStackPushArray(ICNodeConnection, totalConnectionCount, mstack);
           }
-
-          ic_node->output_connections = MStackPushArray(ICNodeConnection, totalConnectionCount, mstack);
         };
         
         //TODO(Torin) @UNSAFE This stack allocation could potentialy be enormous
