@@ -529,30 +529,7 @@ void SimulationStep(Editor *editor){
 
 static inline
 void DrawNodeDebugInfo(EditorNode *node){
-  ImGui::Begin("NodeDebugInfo");
-  ImGui::Text("type: %s", NodeName[node->type]);
-  ImGui::Text("input_count: %zu", node->input_count);
-  ImGui::Text("output_count: %zu", node->output_count);
-  if(ImGui::CollapsingHeader("InputConnections")){
-    it(i, node->input_count){
-    }
   }
-
-  if(node->output_count > 0){
-    it(i, node->output_count){
-      if(ImGui::TreeNode((void*)i, "output %zu", i)){
-        auto &outputSlot = node->output_connections[i];
-        it(n, outputSlot.count){
-          
-        }
-        
-        ImGui::TreePop();
-      }
-    }
-  }
-
-  ImGui::End();
-}
 
 
 void DrawEditor(Editor *editor){
@@ -613,6 +590,8 @@ void DrawEditor(Editor *editor){
   ImVec2 offset = ImGui::GetCursorScreenPos() - scrolling;
   ImVec2 canvasMouseCoords = ImGui::GetMousePos() - canvasOrigin;
 
+  ImVec2 editorSpaceMousePos = (ImGui::GetMousePos() - canvasOrigin) + scrolling;
+
   ImDrawList* draw_list = ImGui::GetWindowDrawList();
   draw_list->ChannelsSplit(2);
 
@@ -629,12 +608,12 @@ void DrawEditor(Editor *editor){
 
 
   auto GetNodeInputSlotPos = [](const EditorNode *node, const int slotIndex) -> ImVec2 {
-    auto result = ImVec2(node->position.x, node->position.y + node->size.y * ((float)slotIndex+1) / ((float)2+1));
+    auto result = ImVec2(node->position.x, node->position.y + node->size.y * ((float)slotIndex+1) / ((float)node->input_count+1));
     return result;
   };
 
   auto GetNodeOutputSlotPos = [](const EditorNode *node, const int slotIndex) -> ImVec2 {
-    auto result = ImVec2(node->position.x + node->size.x, node->position.y + node->size.y * ((float)slotIndex+1) / ((float)1+1));
+    auto result = ImVec2(node->position.x + node->size.x, node->position.y + node->size.y * ((float)slotIndex+1) / ((float)node->output_count+1));
     return result;
   };
 
@@ -836,6 +815,12 @@ void DrawEditor(Editor *editor){
     is_context_menu_open = true;
   }
 
+  const uint8_t *keyboardstate = SDL_GetKeyboardState(0);
+  const SDL_Scancode esc_scancode = SDL_GetScancodeFromKey(SDLK_ESCAPE);
+  if(keyboardstate[esc_scancode]){
+    editor->mode = EditorMode_None;
+  }
+
   switch(editor->mode){
     case EditorMode_None:{
       if(ImGui::IsMouseDragging(0)){
@@ -848,14 +833,19 @@ void DrawEditor(Editor *editor){
 
     } break;
 
-    case EditorMode_DEFAULT:{
+    case EditorMode_PLACEMENT:{
       if(node_hovered == InvalidNodeIndex()){
         const ImColor color = ImColor(100, 100, 100, 100);
         draw_list->AddRectFilled(ImGui::GetMousePos(), ImGui::GetMousePos() + ImVec2(64, 64), color);
 
-        if(ImGui::IsMouseClicked(0)){
-        auto node = CreateNode(editor->placementNodeType, editor);
-        node->position = ImGui::GetMousePos();
+        //TODO(Torin) Hack to fix bullshit SDL / ImGui bug
+        //where rarely it registers multiple mouse down events when only one happens
+        static float creationCooldown = 0.0f;
+        if(creationCooldown > 0.0f) creationCooldown -= ImGui::GetIO().DeltaTime;
+        if(ImGui::IsMouseClicked(0) && ImGui::IsMouseDown(0) && creationCooldown <= 0.0f){
+          auto node = CreateNode(editor->placementNodeType, editor);
+          node->position = canvasMouseCoords; 
+          creationCooldown += 0.1f;
         }
       }
 
@@ -865,7 +855,7 @@ void DrawEditor(Editor *editor){
     case EditorMode_SelectBox:{
       if(ImGui::IsMouseDragging(0) == 0){
         editor->selectedNodes.count = 0;
-        auto end = ImGui::GetMousePos();
+        auto end = editorSpaceMousePos; 
         Rectangle selectBoxBounds;
         selectBoxBounds.minX = Min(editor->selectBoxOrigin.x, end.x);
         selectBoxBounds.maxX = Max(editor->selectBoxOrigin.x, end.x);
@@ -910,6 +900,8 @@ void DrawEditor(Editor *editor){
         DynamicArray<EditorNode *> outputs;
         DynamicArray<EditorNode *> logic;
 
+
+        ImVec2 averagePosition; 
         it(i, editor->selectedNodes.count){
           EditorNode *node = GetNode(editor->selectedNodes[i], editor);
           if(node->type == NodeType_INPUT) {
@@ -919,7 +911,9 @@ void DrawEditor(Editor *editor){
           } else {
             ArrayAdd(node, logic);
           }
+          averagePosition += node->position;
         }
+        averagePosition /= (float)editor->selectedNodes.count;
 
         size_t required_memory = sizeof(ICDefinition);
         for(size_t i = 0; i < editor->selectedNodes.count; i++){
@@ -927,7 +921,9 @@ void DrawEditor(Editor *editor){
           required_memory += sizeof(ICNode);
           required_memory += node->input_count * sizeof(NodeState);
           required_memory += node->output_count * sizeof(uint32_t);
-          required_memory += node->output_count * sizeof(ICNodeConnection);
+          for(size_t n = 0; n < node->output_count; n++){
+            required_memory += node->output_connections[n].count * sizeof(ICNodeConnection);
+          } 
         }
 
         ICDefinition *icdef = (ICDefinition *)calloc(required_memory, 1);
@@ -958,11 +954,14 @@ void DrawEditor(Editor *editor){
               ic_node->connection_count_per_output[n] = connections.count;
               totalConnectionCount += connections.count;
             }
+            
             ic_node->output_connections = MStackPushArray(ICNodeConnection, totalConnectionCount, mstack);
           }
         };
         
         //TODO(Torin) @UNSAFE This stack allocation could potentialy be enormous
+        //NOTE(Torin) The following loops build a lookuptable to map a pointer to an EditorNode
+        //To the index of the new coresponding ICNode
         EditorNode *icToEdMap[editor->selectedNodes.count];
         size_t currentICNodeIndex = 0;
         for(size_t i = 0; i < inputs.count; i++){
@@ -990,10 +989,13 @@ void DrawEditor(Editor *editor){
           currentICNodeIndex++;
         }
 
+        //NOTE(Torin) Fills out the connections between the nodes now that there locations
+        //are known via the previous step
         for(size_t i = 0; i < icdef->node_count; i++){
           ICNode *icnode = &icdef->nodes[i];
           EditorNode *ednode = icToEdMap[i];
           size_t currentConnectionIndex = 0;
+
           for(size_t n = 0; n < icnode->output_count; n++){
             DynamicArray<NodeConnection>& connections = ednode->output_connections[n]; 
             for(size_t j = 0; j < connections.count; j++){
@@ -1007,7 +1009,7 @@ void DrawEditor(Editor *editor){
                 assert(false);
               }
               icConnection.node_index = connectedNodeIndex;
-              icnode->output_connections[currentConnectionIndex] = icConnection;
+              icnode->output_connections[currentConnectionIndex++] = icConnection;
             }
           }
         }
@@ -1018,6 +1020,7 @@ void DrawEditor(Editor *editor){
 
         uint32_t node_type = NodeType_COUNT + 1 + (editor->icdefs.count - 1);
         auto node = CreateNode(node_type, editor);
+        node->position = averagePosition;
 
         ArrayDestroy(inputs);
         ArrayDestroy(outputs);
@@ -1061,19 +1064,45 @@ void DrawEditor(Editor *editor){
 
   ImGui::End();
 
-#if 0
-  if(editor->selectedNodes.count == 1){
-    DrawNodeDebugInfo(GetNode(editor->selectedNodes[0], editor));
+
+
+  ImGui::Begin("NodeDebugInfo");
+  for(size_t i = 0; i < editor->nodes.count; i++){
+    EditorNode *node = editor->nodes[i];  
+    if(ImGui::TreeNode((void*)i, "%s", NodeName[node->type])){
+      ImGui::Text("type: %s", NodeName[node->type]);
+      ImGui::Text("input_count: %zu", node->input_count);
+      ImGui::Text("output_count: %zu", node->output_count);
+      if(ImGui::CollapsingHeader("InputConnections")){
+      }
+      ImGui::TreePop();
+    }
   }
-#endif
+
+  ImGui::End();
 }
 
 int main(){
   QuickAppStart("Hardware Simulator", 1280, 720);
   Editor editor = {};
+
+  editor.toolbar.hotkey[0] = SDL_SCANCODE_1;
+  editor.toolbar.hotkey[1] = SDL_SCANCODE_2;
+  editor.toolbar.hotkey[2] = SDL_SCANCODE_3;
+  editor.toolbar.hotkey[3] = SDL_SCANCODE_4;
+  editor.toolbar.hotkey[4] = SDL_SCANCODE_5;
+  editor.toolbar.hotkey[5] = SDL_SCANCODE_6;
+  editor.toolbar.hotkey[6] = SDL_SCANCODE_7;
+  editor.toolbar.hotkey[7] = SDL_SCANCODE_8;
+  editor.toolbar.hotkey[8] = SDL_SCANCODE_9;
+  editor.toolbar.hotkey[9] = SDL_SCANCODE_0;
+  editor.toolbar.count = 10;
+
   editor.toolbar.nodeTypes[0] = NodeType_INPUT;
   editor.toolbar.nodeTypes[1] = NodeType_OUTPUT;
-  editor.toolbar.count = 10;
+  editor.toolbar.nodeTypes[2] = NodeType_AND;
+  editor.toolbar.nodeTypes[3] = NodeType_OR;
+  editor.toolbar.nodeTypes[4] = NodeType_XOR;
 
   QuickAppLoop([&]() {
     SimulationStep(&editor);

@@ -1,6 +1,6 @@
 struct Toolbar {
   uint32_t nodeTypes[10];
-  uint32_t keycode[10]; 
+  uint32_t hotkey[10]; 
   size_t count;
 };
 
@@ -8,6 +8,7 @@ enum EditorMode {
   EditorMode_None,
   EditorMode_SelectBox,
   EditorMode_DEFAULT,
+  EditorMode_PLACEMENT,
 };
 
 struct Editor {
@@ -21,17 +22,13 @@ struct Editor {
   Toolbar toolbar;
   EditorMode mode;
 
-  union {
-
-    struct /*EditorMode_CREATE*/{
-      uint32_t placementNodeType;
-    };
-
-    ImVec2 selectBoxOrigin;
-  };
+  uint32_t placementNodeType;
+  ImVec2 selectBoxOrigin;
 };
 
 void DrawToolbarVerticaly(Toolbar *t, Editor *e){
+  const uint8_t *keystate = SDL_GetKeyboardState(NULL);
+
   ImGui::BeginGroup();
   for(size_t i = 0; i < t->count; i++){
     const char *buttonText = "X"; 
@@ -40,10 +37,16 @@ void DrawToolbarVerticaly(Toolbar *t, Editor *e){
       buttonText = NodeName[t->nodeTypes[i]];
     }
 
-    if(ImGui::Button(buttonText, ImVec2(32, 32))){
+    static const ImColor DEFAULT_COLOR = ImColor(50, 50, 50); 
+    static const ImColor ACTIVE_COLOR = ImColor(180, 140, 50);
+    const ImColor color = (t->nodeTypes[i] == e->placementNodeType && e->mode == EditorMode_PLACEMENT) ? ACTIVE_COLOR : DEFAULT_COLOR;
+    ImGui::PushStyleColor(ImGuiCol_Button, color);
+    if(ImGui::Button(buttonText, ImVec2(32, 32)) || keystate[t->hotkey[i]] == 1){
       e->placementNodeType = t->nodeTypes[i];
-      e->mode = EditorMode_DEFAULT;
+      e->mode = EditorMode_PLACEMENT;
     }
+    ImGui::PopStyleColor();
+
 
   }
   ImGui::EndGroup();
