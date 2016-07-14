@@ -7,24 +7,25 @@
 
 #include "utils.cpp"
 
-
 #define it(name, n) for(size_t name = 0; name < n; name++)
 
-static const char *NodeName[] = {
-  "AND",
-  "OR",
-  "XOR",
-  "INPUT",
-  "OUTPUT",
-};
-
 enum NodeType {
+  NodeType_INVALID,
   NodeType_AND,
   NodeType_OR,
   NodeType_XOR,
   NodeType_INPUT,
   NodeType_OUTPUT,
   NodeType_COUNT,
+};
+
+static const char *NodeName[] = {
+  "INVALID",
+  "AND",
+  "OR",
+  "XOR",
+  "INPUT",
+  "OUTPUT",
 };
 
 enum NodeState : uint8_t {
@@ -89,28 +90,7 @@ struct ICDefinition {
   ICNode *nodes; 
 };
 
-enum EditorMode {
-  EditorMode_None,
-  EditorMode_SelectBox,
-};
-
-struct Editor {
-  DynamicArray<EditorNode *> inputs;
-  DynamicArray<EditorNode *> nodes;
-  DynamicArray<NodeIndex> selectedNodes;
-  DynamicArray<ICDefinition *> icdefs;
-  
-  EditorMode mode;
-  union {
-    ImVec2 selectBoxOrigin;
-  };
-};
-
-struct MemoryBlock {
-  size_t size;
-  size_t used;
-  uintptr_t memory;
-};
+#include "editor.cpp"
 
 
 EditorNode *AllocateNode(uint32_t input_count, uint32_t output_count) {
@@ -520,8 +500,6 @@ void iterate_nodes(Editor *editor, std::function<void(EditorNode*, NodeIndex)> p
   }
 }
 
-
-
 //TODO(Torin) Why should this care about an editor ptr
 //Just directly pass the node block array it signals intent better
 
@@ -613,6 +591,13 @@ void DrawEditor(Editor *editor){
   if(is_context_menu_open == false){
     node_hovered = InvalidNodeIndex();
   }
+
+  //Sidepanel
+  ImGui::BeginChild("SidePanel", ImVec2(256, 0));
+  DrawToolbarVerticaly(&editor->toolbar, editor);
+  ImGui::EndChild();
+  ImGui::SameLine();
+  
 
 
   ImGui::BeginGroup();
@@ -858,6 +843,23 @@ void DrawEditor(Editor *editor){
         editor->selectBoxOrigin = ImGui::GetMousePos();
         editor->mode = EditorMode_SelectBox;
       }
+
+
+
+    } break;
+
+    case EditorMode_DEFAULT:{
+      if(node_hovered == InvalidNodeIndex()){
+        const ImColor color = ImColor(100, 100, 100, 100);
+        draw_list->AddRectFilled(ImGui::GetMousePos(), ImGui::GetMousePos() + ImVec2(64, 64), color);
+
+        if(ImGui::IsMouseClicked(0)){
+        auto node = CreateNode(editor->placementNodeType, editor);
+        node->position = ImGui::GetMousePos();
+        }
+      }
+
+
     } break;
 
     case EditorMode_SelectBox:{
@@ -1069,6 +1071,9 @@ void DrawEditor(Editor *editor){
 int main(){
   QuickAppStart("Hardware Simulator", 1280, 720);
   Editor editor = {};
+  editor.toolbar.nodeTypes[0] = NodeType_INPUT;
+  editor.toolbar.nodeTypes[1] = NodeType_OUTPUT;
+  editor.toolbar.count = 10;
 
   QuickAppLoop([&]() {
     SimulationStep(&editor);
